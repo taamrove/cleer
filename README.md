@@ -71,8 +71,18 @@ open Cleer.xcodeproj       # build & run on your Mac
 
 You get a window where you **Add instance**, pick an **input device + channel**
 and **output device** per instance, toggle Feedback / Denoise / **Neural** /
-Dereverb live, and watch level meters + the active-notch count. Each instance
-runs its own `VoicePipeline`.
+Dereverb live (plus a master **Process / Bypass** switch to A/B the whole
+chain), and watch level meters + the active-notch count. Each instance runs its
+own `VoicePipeline`.
+
+**One interface in, a different interface out:** yes. Each instance uses two
+audio engines — a capture engine pinned to the input interface and a playback
+engine pinned to the output interface — so they can be entirely different
+devices. A ring buffer bridges their independent hardware clocks with drift
+correction, so latency stays bounded. For *sample-accurate* sync across two
+interfaces, you can alternatively make an **Aggregate Device** in Audio MIDI
+Setup and select it for both; the UI flags when in/out are on different
+interfaces.
 
 **Train in the app:** click **Personalise**, sample a few seconds of your room
 noise (stay silent), and Cleer fine-tunes the CoreML denoiser to your

@@ -22,6 +22,12 @@ struct InstanceRowView: View {
         HStack {
             TextField("Name", text: $instance.name).textFieldStyle(.plain).font(.headline)
             Spacer()
+            // Master process/bypass toggle (A/B the whole chain).
+            Toggle("Process", isOn: Binding(
+                get: { !instance.bypassed },
+                set: { instance.bypassed = !$0 }))
+                .toggleStyle(.switch)
+                .help("Off = pass audio through untouched (bypass)")
             Circle().fill(instance.isRunning ? .green : .gray).frame(width: 8, height: 8)
             Button(instance.isRunning ? "Stop" : "Start") {
                 instance.isRunning ? instance.stop() : instance.start()
@@ -33,24 +39,32 @@ struct InstanceRowView: View {
     }
 
     private var routing: some View {
-        HStack(spacing: 12) {
-            Picker("Input", selection: $instance.inputDevice) {
-                Text("—").tag(AudioDevice?.none)
-                ForEach(manager.inputDevices) { dev in
-                    Text(dev.name).tag(AudioDevice?.some(dev))
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 12) {
+                Picker("Input", selection: $instance.inputDevice) {
+                    Text("—").tag(AudioDevice?.none)
+                    ForEach(manager.inputDevices) { dev in
+                        Text(dev.name).tag(AudioDevice?.some(dev))
+                    }
+                }
+                Picker("Channel", selection: $instance.inputChannel) {
+                    ForEach(0..<max(1, instance.inputDevice?.inputChannels ?? 1), id: \.self) { c in
+                        Text("Ch \(c + 1)").tag(c)
+                    }
+                }
+                .frame(width: 110)
+                Picker("Output", selection: $instance.outputDevice) {
+                    Text("—").tag(AudioDevice?.none)
+                    ForEach(manager.outputDevices) { dev in
+                        Text(dev.name).tag(AudioDevice?.some(dev))
+                    }
                 }
             }
-            Picker("Channel", selection: $instance.inputChannel) {
-                ForEach(0..<max(1, instance.inputDevice?.inputChannels ?? 1), id: \.self) { c in
-                    Text("Ch \(c + 1)").tag(c)
-                }
-            }
-            .frame(width: 110)
-            Picker("Output", selection: $instance.outputDevice) {
-                Text("—").tag(AudioDevice?.none)
-                ForEach(manager.outputDevices) { dev in
-                    Text(dev.name).tag(AudioDevice?.some(dev))
-                }
+            if instance.crossDevice {
+                Label("Input and output are different interfaces — clocks are drift-corrected. "
+                      + "For sample-accurate sync, consider an Aggregate Device.",
+                      systemImage: "info.circle")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
         }
     }
@@ -70,6 +84,8 @@ struct InstanceRowView: View {
                 .foregroundStyle(.secondary).font(.caption)
         }
         .toggleStyle(.switch)
+        .disabled(instance.bypassed)
+        .opacity(instance.bypassed ? 0.4 : 1)
     }
 
     private var meters: some View {
