@@ -1,0 +1,55 @@
+# XcodeGen spec — generates Cleer.xcodeproj.
+#   brew install xcodegen
+#   cd macos && xcodegen generate && open Cleer.xcodeproj
+#
+# (XcodeGen lets us keep a real, buildable Xcode app under version control
+#  without committing the unmergeable .xcodeproj. You can also just create a
+#  new macOS App target in Xcode and drag the Cleer/ folder in.)
+
+name: Cleer
+options:
+  bundleIdPrefix: as.trv.cleer
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Apple-silicon first; universal is fine too.
+    ARCHS: "$(ARCHS_STANDARD)"
+
+targets:
+  Cleer:
+    type: application
+    platform: macOS
+    sources:
+      - path: Cleer
+        excludes:
+          - "Resources/Info.plist"
+          - "Resources/Cleer.entitlements"
+    resources: []
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: as.trv.cleer
+        INFOPLIST_FILE: Cleer/Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Cleer/Resources/Cleer.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        GENERATE_INFOPLIST_FILE: NO
+    dependencies:
+      - sdk: Accelerate.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreAudio.framework
+
+  CleerTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: Cleer
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: as.trv.cleer.tests

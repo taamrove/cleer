@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+reference/out/
+.venv/
+
+# macOS / Xcode
+.DS_Store
+macos/Cleer.xcodeproj/
+macos/DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
