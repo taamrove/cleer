@@ -55,11 +55,19 @@ struct ContentView: View {
         VStack(spacing: 12) {
             Spacer()
             Image(systemName: "waveform.badge.mic").font(.system(size: 48)).foregroundStyle(.secondary)
-            Text("No instances yet").font(.title3)
-            Text("Add an instance, assign it to an input device and channel.")
+            Text("Live vocal → Mac speakers").font(.title3)
+            Text("One click: take your mic, clean it up, play it out the Mac speakers.")
                 .foregroundStyle(.secondary)
-            Button("Add instance") { manager.addInstance() }
+            Button {
+                manager.quickStartMicToSpeakers()
+            } label: { Label("Start mic → speakers", systemImage: "play.fill") }
                 .buttonStyle(.borderedProminent)
+            Text("Tip: on open speakers a live mic can ring — keep the volume moderate, "
+                 + "or use headphones. (Suppressing that ring is exactly what Feedback does.)")
+                .font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center).frame(maxWidth: 360)
+            Button("Set up manually instead") { manager.addInstance() }
+                .buttonStyle(.link)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -32,6 +32,20 @@ final class InstanceManager: ObservableObject {
         return inst
     }
 
+    /// The simple case: mic in -> Mac speakers out, processed, started. Picks the
+    /// default input and the built-in speakers and hits go.
+    @discardableResult
+    func quickStartMicToSpeakers() -> ProcessingInstance {
+        let inst = ProcessingInstance(name: "Live vocal")
+        inst.inputDevice = inputDevices.first
+        inst.outputDevice = outputDevices.first { $0.name.localizedCaseInsensitiveContains("speaker")
+            || $0.name.localizedCaseInsensitiveContains("built-in") } ?? outputDevices.first
+        instances.append(inst)
+        applyPersonalizedModelIfAvailable()
+        inst.start()
+        return inst
+    }
+
     func remove(_ instance: ProcessingInstance) {
         instance.stop()
         instances.removeAll { $0.id == instance.id }
