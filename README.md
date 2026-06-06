@@ -84,6 +84,9 @@ interfaces, you can alternatively make an **Aggregate Device** in Audio MIDI
 Setup and select it for both; the UI flags when in/out are on different
 interfaces.
 
+**Setup recipes** (live mix; or testing a recorded vocal via BlackHole → Mac
+speakers): see [`docs/usage.md`](docs/usage.md).
+
 **Train in the app:** click **Personalise**, sample a few seconds of your room
 noise (stay silent), and Cleer fine-tunes the CoreML denoiser to your
 environment on-device via `MLUpdateTask` — the personalised model is saved to
