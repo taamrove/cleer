@@ -59,6 +59,11 @@ struct InstanceRowView: View {
         HStack(spacing: 16) {
             Toggle("Feedback", isOn: $instance.feedbackEnabled)
             Toggle("Denoise", isOn: $instance.denoiseEnabled)
+            Toggle("Neural", isOn: $instance.useNeuralDenoise)
+                .disabled(!instance.neuralAvailable || !instance.denoiseEnabled)
+                .help(instance.neuralAvailable
+                      ? "Use the CoreML mask (ANE) instead of the classical denoiser"
+                      : "CoreML model not loaded")
             Toggle("Dereverb", isOn: $instance.dereverbEnabled)
             Spacer()
             Label("\(instance.activeNotches) notches", systemImage: "scissors")

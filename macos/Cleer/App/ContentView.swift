@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var manager: InstanceManager
+    @State private var showTraining = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,6 +22,9 @@ struct ContentView: View {
                 }
             }
         }
+        .sheet(isPresented: $showTraining) {
+            TrainingView(trainer: manager.trainer).environmentObject(manager)
+        }
     }
 
     private var toolbar: some View {
@@ -36,6 +40,9 @@ struct ContentView: View {
             Button {
                 manager.stopAll()
             } label: { Label("Stop all", systemImage: "stop.fill") }
+            Button {
+                showTraining = true
+            } label: { Label("Personalise", systemImage: "brain.head.profile") }
             Button {
                 manager.addInstance()
             } label: { Label("Add instance", systemImage: "plus") }

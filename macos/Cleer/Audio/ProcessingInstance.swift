@@ -32,6 +32,13 @@ final class ProcessingInstance: ObservableObject, Identifiable {
     @Published var feedbackEnabled = true { didSet { pipeline.feedbackEnabled = feedbackEnabled } }
     @Published var denoiseEnabled = true { didSet { pipeline.denoiseEnabled = denoiseEnabled } }
     @Published var dereverbEnabled = true { didSet { pipeline.dereverbEnabled = dereverbEnabled } }
+    @Published var useNeuralDenoise = false { didSet { pipeline.useNeuralDenoise = useNeuralDenoise } }
+
+    /// Whether a CoreML denoise model loaded for this instance.
+    var neuralAvailable: Bool { pipeline.neuralAvailable }
+
+    /// Hot-swap a personalised (on-device trained) model into this instance.
+    func applyPersonalizedModel(_ url: URL) { pipeline.neural?.reload(from: url) }
 
     private let pipeline: VoicePipeline
     private let chunker: BlockChunker

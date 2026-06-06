@@ -13,6 +13,7 @@ final class VoicePipeline {
 
     let feedback: FeedbackSuppressor
     let noise: NoiseReducer
+    let neural: NeuralNoiseReducer?
     let dereverb: Dereverb
     private let stft: STFT
 
@@ -20,12 +21,19 @@ final class VoicePipeline {
     var feedbackEnabled = true
     var denoiseEnabled = true
     var dereverbEnabled = true
+    /// Use the CoreML mask instead of the classical Wiener denoiser, when a
+    /// model is available. Falls back to classical if the model failed to load.
+    var useNeuralDenoise = false
+
+    /// True if the CoreML denoise model loaded successfully.
+    var neuralAvailable: Bool { neural != nil }
 
     init(sampleRate: Double = 48000, win: Int = 1024, hop: Int = 256) {
         self.sampleRate = sampleRate; self.win = win; self.hop = hop
         let bins = win / 2 + 1
         self.feedback = FeedbackSuppressor(sampleRate: sampleRate, win: win, hop: hop)
         self.noise = NoiseReducer(bins: bins)
+        self.neural = NeuralNoiseReducer(bins: bins, sampleRate: sampleRate)
         self.dereverb = Dereverb(bins: bins, sampleRate: sampleRate, hop: hop)
         self.stft = STFT(win: win, hop: hop)
     }
@@ -40,7 +48,12 @@ final class VoicePipeline {
         block = stft.process(block) { mags in
             var gain = [Double](repeating: 1.0, count: mags.count)
             if self.denoiseEnabled {
-                let g = self.noise.mask(mags)
+                let g: [Double]
+                if self.useNeuralDenoise, let neural = self.neural {
+                    g = neural.mask(mags)            // CoreML per-band mask (ANE)
+                } else {
+                    g = self.noise.mask(mags)        // classical Wiener mask
+                }
                 for k in 0..<gain.count { gain[k] *= g[k] }
             }
             if self.dereverbEnabled {
