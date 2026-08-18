@@ -18,3 +18,7 @@ defeedback/
 
 # Local audio test material
 *.wav
+
+# Plugin build tree
+plugin/build/
+plugin/JUCE/

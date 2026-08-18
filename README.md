@@ -12,6 +12,21 @@ This repo has two parts:
 | `reference/`  | A **runnable, validated Python reference** of the three DSP stages. This is where we figured out (and proved) the internals. | Any machine with Python |
 | `ml/`         | The **neural denoise mask**: train it, validate it (it beats the classical denoiser), and export an **updatable CoreML model** the app can fine-tune on device. | Any machine with Python |
 | `macos/`      | A **native macOS app** (Swift + Accelerate + CoreAudio + CoreML + SwiftUI) where you add **instances**, each assigned to an **audio device + channel**, running the same algorithms on live audio — including the neural mask and **on-device "train in the app"** personalisation. | Apple-silicon Mac, built in Xcode |
+| `plugin/`     | The same live chain (feedback suppression + downward expander) as a **VST3 / AU / Standalone plug-in** (JUCE, C++). The DSP core is framework-free and covered by an offline test harness. | Any DAW; build with CMake |
+
+## Building the plug-in
+
+```bash
+cd plugin
+cmake -B build                      # add -DCLEER_JUCE_PATH=/path/to/JUCE to skip the fetch
+cmake --build build -j8
+ctest --test-dir build              # offline DSP harness (no JUCE needed)
+```
+
+Artefacts land in `plugin/build/Cleer_artefacts/Release/{VST3,AU,Standalone}`;
+copy `Cleer.vst3` to `~/Library/Audio/Plug-Ins/VST3/` and `Cleer.component`
+to `~/Library/Audio/Plug-Ins/Components/` (or configure with
+`-DCLEER_COPY_PLUGIN=ON`). The plug-in is `aufx Clr1 Trva` and passes `auval`.
 
 ## How de-feedback actually works (the reverse-engineered internals)
 

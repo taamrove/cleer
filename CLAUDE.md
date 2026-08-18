@@ -14,6 +14,7 @@ vocals: suppress microphone **feedback (howl)**, reduce **noise**, and reduce
 | `reference/` | Validated Python reference of the 3 DSP stages | any Python |
 | `ml/` | Neural denoise mask: train, validate, export updatable CoreML | any Python |
 | `macos/` | Native app (Swift + Accelerate + CoreAudio + CoreML + SwiftUI) | Apple-silicon Mac, Xcode |
+| `plugin/` | VST3/AU/Standalone plug-in (JUCE, C++) of the live chain: feedback suppressor + expander. DSP core in `plugin/Source/dsp/` is header-only and JUCE-free; `plugin/Tests/DspTests.cpp` is the offline harness (`ctest`). Keep it in sync with the Swift and Python versions. | any DAW; CMake |
 
 The user's real use case: **live mix** (audio interface in → out) and **testing**
 a recorded vocal via **BlackHole → Mac speakers**. See `docs/usage.md`.
