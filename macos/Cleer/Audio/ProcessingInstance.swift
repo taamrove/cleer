@@ -41,21 +41,15 @@ final class ProcessingInstance: ObservableObject, Identifiable {
     @Published var bypassed = false
 
     @Published var feedbackEnabled = true { didSet { pipeline.feedbackEnabled = feedbackEnabled } }
-    @Published var denoiseEnabled = true { didSet { pipeline.denoiseEnabled = denoiseEnabled } }
-    @Published var dereverbEnabled = true { didSet { pipeline.dereverbEnabled = dereverbEnabled } }
-    @Published var useNeuralDenoise = false { didSet { pipeline.useNeuralDenoise = useNeuralDenoise } }
-
-    /// Whether a CoreML denoise model loaded for this instance.
-    var neuralAvailable: Bool { pipeline.neuralAvailable }
+    @Published var gateEnabled = true { didSet { pipeline.gateEnabled = gateEnabled } }
+    @Published var gateThresholdDB: Double = -42.0 { didSet { pipeline.expander.params.thresholdDB = gateThresholdDB } }
+    @Published var gateRatio: Double = 3.0 { didSet { pipeline.expander.params.ratio = gateRatio } }
 
     /// True when input and output are on different interfaces (cross-clock).
     var crossDevice: Bool {
         guard let i = inputDevice, let o = outputDevice else { return false }
         return i.id != o.id
     }
-
-    /// Hot-swap a personalised (on-device trained) model into this instance.
-    func applyPersonalizedModel(_ url: URL) { pipeline.neural?.reload(from: url) }
 
     private let pipeline: VoicePipeline
     private let chunker: BlockChunker
@@ -67,9 +61,27 @@ final class ProcessingInstance: ObservableObject, Identifiable {
     private var ring = [Float](repeating: 0, count: 1 << 16)
     private var writeIdx = 0
     private var readIdx = 0
-    private let ringLock = NSLock()
-    // Target fill (~43 ms) the drift corrector tries to hold.
-    private let targetFill = 2048
+    // os_unfair_lock: bounded-priority, real-time-safe (NSLock is not — it can
+    // cause priority inversion on the audio render thread → underruns/stutter).
+    private var ringLock = os_unfair_lock_s()
+    // Target fill (~85 ms) the drift corrector tries to hold. Bigger than the
+    // strict minimum so a one-off scheduling spike (a frame the DSP took a
+    // little longer on, a Bluetooth radio re-poll, etc.) can't underrun.
+    private let targetFill = 4096
+    // Whether to actively drift-correct. Only true when input and output are on
+    // DIFFERENT interfaces (independent hardware clocks). Same interface = one
+    // clock, no drift; correcting in that case just chases sub-sample jitter
+    // and produces audible pulsing at the correction cadence.
+    private var driftCorrect = false
+    // Don't let the playback engine drain the ring until it has been filled to
+    // `targetFill` at least once. Without this, on start playback pulls before
+    // capture has produced anything → zero-fill underrun → stutter cascade.
+    private var primed = false
+
+    // Meter update throttle. Dispatching to main on every audio callback floods
+    // the main queue; we only need ~30 Hz for a UI meter.
+    private var meterSampleCounter = 0
+    private let meterSampleInterval = 1600   // ~30 Hz at 48 kHz
 
     init(name: String, sampleRate: Double = 48000) {
         self.name = name
@@ -80,6 +92,10 @@ final class ProcessingInstance: ObservableObject, Identifiable {
     func start() {
         guard let input = inputDevice else { return }
         resetRing()
+        // Only drift-correct when in/out are on different interfaces. Same
+        // device = same hardware clock, no drift to correct — and trying to
+        // correct sub-sample scheduling jitter creates audible pulsing.
+        driftCorrect = crossDevice
 
         // --- Capture engine (input interface) ---------------------------------
         let capture = AVAudioEngine()
@@ -90,7 +106,11 @@ final class ProcessingInstance: ObservableObject, Identifiable {
         let channels = Int(inputFormat.channelCount)
         let ch = min(inputChannel, max(0, channels - 1))
 
-        capture.inputNode.installTap(onBus: 0, bufferSize: 256, format: inputFormat) { [weak self] buf, _ in
+        // 2048 frames (~43 ms @ 48k) — observed CPU was hitting 149% (DSP
+        // running over the wall-clock budget) and CoreAudio was logging
+        // "skipping cycle due to overload". Doubling the per-block budget +
+        // killing per-callback allocations in BlockChunker pulls us back under.
+        capture.inputNode.installTap(onBus: 0, bufferSize: 2048, format: inputFormat) { [weak self] buf, _ in
             guard let self = self, let data = buf.floatChannelData else { return }
             let n = Int(buf.frameLength)
             var mono = [Float](repeating: 0, count: n)
@@ -99,9 +119,16 @@ final class ProcessingInstance: ObservableObject, Identifiable {
             for i in 0..<n { mono[i] = src[i]; peak = max(peak, abs(src[i])) }
             let out = self.bypassed ? mono : self.chunker.process(mono)
             self.pushRing(out)
-            DispatchQueue.main.async {
-                self.inputLevel = peak
-                self.activeNotches = self.bypassed ? 0 : self.pipeline.feedback.activeNotchCount
+            // Throttle the UI meter — flooding the main queue at audio rate
+            // serialises against the rest of the UI and can starve the render.
+            self.meterSampleCounter += n
+            if self.meterSampleCounter >= self.meterSampleInterval {
+                self.meterSampleCounter = 0
+                let notches = self.bypassed ? 0 : self.pipeline.feedback.activeNotchCount
+                DispatchQueue.main.async {
+                    self.inputLevel = peak
+                    self.activeNotches = notches
+                }
             }
         }
 
@@ -111,6 +138,20 @@ final class ProcessingInstance: ObservableObject, Identifiable {
         if let output = outputDevice { setDevice(playback.outputNode.audioUnit, deviceID: output.id) }
         let outFormat = playback.outputNode.inputFormat(forBus: 0)
 
+        // The source node will produce samples at the CAPTURE sample rate — we
+        // don't resample in the chunker, we just buffer. If we lie to the
+        // engine and declare the source as outFormat (output device rate), it
+        // plays our 48 k samples at the device's e.g. 44.1 k rate → audible
+        // pitch shift. Declaring inputFormat.sampleRate lets mainMixerNode
+        // insert an SRC between us and the output device automatically.
+        let sourceFormat = AVAudioFormat(
+            standardFormatWithSampleRate: inputFormat.sampleRate,
+            channels: outFormat.channelCount) ?? outFormat
+        NSLog("Cleer: capture sr=\(inputFormat.sampleRate) ch=\(inputFormat.channelCount), "
+            + "output sr=\(outFormat.sampleRate) ch=\(outFormat.channelCount), "
+            + "source declared sr=\(sourceFormat.sampleRate)")
+
+        var outMeterCounter = 0
         let source = AVAudioSourceNode { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
             guard let self = self else { return noErr }
             let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
@@ -121,12 +162,17 @@ final class ProcessingInstance: ObservableObject, Identifiable {
                 let ptr = buffer.mData!.assumingMemoryBound(to: Float.self)
                 for i in 0..<n { ptr[i] = samples[i]; peak = max(peak, abs(samples[i])) }
             }
-            DispatchQueue.main.async { self.outputLevel = peak }
+            // Same throttle as input meter — ~30 Hz UI updates, not audio rate.
+            outMeterCounter += n
+            if outMeterCounter >= self.meterSampleInterval {
+                outMeterCounter = 0
+                DispatchQueue.main.async { self.outputLevel = peak }
+            }
             return noErr
         }
         self.sourceNode = source
         playback.attach(source)
-        playback.connect(source, to: playback.mainMixerNode, format: outFormat)
+        playback.connect(source, to: playback.mainMixerNode, format: sourceFormat)
 
         do {
             try playback.start()
@@ -152,32 +198,44 @@ final class ProcessingInstance: ObservableObject, Identifiable {
 
     // MARK: - Ring buffer (bridges the two clock domains)
     private func resetRing() {
-        ringLock.lock(); writeIdx = 0; readIdx = 0; ringLock.unlock()
+        os_unfair_lock_lock(&ringLock)
+        writeIdx = 0; readIdx = 0; primed = false
+        os_unfair_lock_unlock(&ringLock)
     }
 
     private func pushRing(_ samples: [Float]) {
-        ringLock.lock(); defer { ringLock.unlock() }
+        os_unfair_lock_lock(&ringLock); defer { os_unfair_lock_unlock(&ringLock) }
         for s in samples {
             ring[writeIdx % ring.count] = s
             writeIdx += 1
         }
-        // Overflow guard: if the capture clock outran playback, drop the oldest
-        // surplus so latency can't grow without bound.
         let available = writeIdx - readIdx
-        if available > targetFill * 3 { readIdx = writeIdx - targetFill }
+        // Soft drift correction — ONLY when crossing clock domains.
+        if driftCorrect && available > targetFill + 64 { readIdx += 1 }
+        // Hard cap: if something is wildly off (device swap, paused output),
+        // still don't let latency grow without bound. Always on.
+        if available > targetFill * 4 { readIdx = writeIdx - targetFill }
+        // Gate playback until the ring has reached targetFill at least once.
+        if !primed && available >= targetFill { primed = true }
     }
 
     private func popRing(_ n: Int) -> [Float] {
-        ringLock.lock(); defer { ringLock.unlock() }
+        os_unfair_lock_lock(&ringLock); defer { os_unfair_lock_unlock(&ringLock) }
         var out = [Float](repeating: 0, count: n)
+        // Pre-prime: emit silence until we have a healthy buffer to drain from.
+        guard primed else { return out }
         let available = writeIdx - readIdx
         let take = min(n, max(0, available))
         for i in 0..<take {
             out[i] = ring[readIdx % ring.count]
             readIdx += 1
         }
-        // Underflow (playback clock outran capture): the remaining samples stay
-        // zero (a brief silence) rather than glitching with stale data.
+        // Soft drift correction on the underflow side — ONLY cross-device.
+        if driftCorrect && take == n && (writeIdx - readIdx) < targetFill - 64 && readIdx > 0 {
+            readIdx -= 1
+        }
+        // Underflow tail stays zero — a brief gap is far less audible than
+        // re-priming and emitting 85 ms of silence on every underrun.
         return out
     }
 

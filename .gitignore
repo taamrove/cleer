@@ -12,3 +12,9 @@ macos/DerivedData/
 build/
 *.xcuserstate
 xcuserdata/
+
+# Alpha Labs original plugin binaries (reference only, not ours to redistribute)
+defeedback/
+
+# Local audio test material
+*.wav

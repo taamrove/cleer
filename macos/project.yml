@@ -53,3 +53,4 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: as.trv.cleer.tests
+        GENERATE_INFOPLIST_FILE: YES

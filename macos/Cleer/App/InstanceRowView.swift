@@ -70,20 +70,34 @@ struct InstanceRowView: View {
     }
 
     private var stages: some View {
-        HStack(spacing: 16) {
-            Toggle("Feedback", isOn: $instance.feedbackEnabled)
-            Toggle("Denoise", isOn: $instance.denoiseEnabled)
-            Toggle("Neural", isOn: $instance.useNeuralDenoise)
-                .disabled(!instance.neuralAvailable || !instance.denoiseEnabled)
-                .help(instance.neuralAvailable
-                      ? "Use the CoreML mask (ANE) instead of the classical denoiser"
-                      : "CoreML model not loaded")
-            Toggle("Dereverb", isOn: $instance.dereverbEnabled)
-            Spacer()
-            Label("\(instance.activeNotches) notches", systemImage: "scissors")
-                .foregroundStyle(.secondary).font(.caption)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 16) {
+                Toggle("Feedback", isOn: $instance.feedbackEnabled)
+                    .help("Adaptive notch filters on bins that grow exponentially (real howl signature). "
+                          + "Conservative defaults — vocal harmonics are left alone.")
+                Toggle("Gate", isOn: $instance.gateEnabled)
+                    .help("Downward expander: full level above threshold, attenuated below. "
+                          + "Keeps tails natural; reduces bleed/room noise between phrases.")
+                Spacer()
+                Label("\(instance.activeNotches) notches", systemImage: "scissors")
+                    .foregroundStyle(.secondary).font(.caption)
+            }
+            .toggleStyle(.switch)
+            HStack(spacing: 12) {
+                Text("Thresh").font(.caption2).foregroundStyle(.secondary).frame(width: 44, alignment: .leading)
+                Slider(value: $instance.gateThresholdDB, in: -70 ... -10)
+                    .disabled(!instance.gateEnabled)
+                Text(String(format: "%+.0f dB", instance.gateThresholdDB))
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary).frame(width: 56, alignment: .trailing)
+            }
+            HStack(spacing: 12) {
+                Text("Ratio").font(.caption2).foregroundStyle(.secondary).frame(width: 44, alignment: .leading)
+                Slider(value: $instance.gateRatio, in: 1.5 ... 8.0)
+                    .disabled(!instance.gateEnabled)
+                Text(String(format: "1:%.1f", instance.gateRatio))
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary).frame(width: 56, alignment: .trailing)
+            }
         }
-        .toggleStyle(.switch)
         .disabled(instance.bypassed)
         .opacity(instance.bypassed ? 0.4 : 1)
     }
