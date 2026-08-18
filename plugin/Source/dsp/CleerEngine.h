@@ -3,14 +3,15 @@
 #include <vector>
 #include "Expander.h"
 #include "FeedbackSuppressor.h"
+#include "NoiseSuppressor.h"
 
 namespace cleer
 {
 
-// The plugin's full chain: per-channel feedback suppression -> linked
-// downward expander. All time-domain, zero added latency; the feedback
-// detector's STFT is analysis-only. Equivalent of the app's VoicePipeline
-// (macos/Cleer/DSP/VoicePipeline.swift) for N channels and float buffers.
+// The plugin's full chain: per-channel feedback suppression -> neural noise
+// suppression (RNNoise) -> linked downward expander. Feedback and expander
+// are time-domain and latency-free; the noise stage adds ~10 ms of frame
+// latency when enabled (latencySamples() reports it, 0 when disabled).
 class Engine
 {
 public:
@@ -20,6 +21,8 @@ public:
         suppressors.clear();
         for (int c = 0; c < numChannels; ++c)
             suppressors.push_back (std::make_unique<FeedbackSuppressor> (sampleRate));
+        noise = std::make_unique<NoiseSuppressor>();
+        noise->prepare (sampleRate, numChannels);
         expander = std::make_unique<Expander> (sampleRate);
 
         scratch.assign ((size_t) numChannels, {});
@@ -29,7 +32,22 @@ public:
     }
 
     bool feedbackEnabled = true;
+    bool noiseEnabled = true;
     bool gateEnabled = true;
+
+    void setNoiseMix (double m)
+    {
+        if (noise)
+            noise->mix = m;
+    }
+
+    // Host samples of delay added by the noise stage; 0 when it is off.
+    int latencySamples() const
+    {
+        return (noiseEnabled && noise) ? noise->latencySamples() : 0;
+    }
+
+    float voiceProbability() const { return noise ? noise->voiceProbability() : 0.0f; }
 
     void setFeedbackParams (const FeedbackSuppressor::Params& p)
     {
@@ -61,6 +79,13 @@ public:
 
             suppressors[(size_t) c]->enabled = feedbackEnabled;
             suppressors[(size_t) c]->processBlock (d, n);
+        }
+
+        if (noise)
+        {
+            noise->enabled = noiseEnabled;
+            if (noiseEnabled)
+                noise->processBlock (scratchPtrs.data(), numCh, n);
         }
 
         if (expander)
@@ -105,6 +130,8 @@ public:
     {
         for (auto& s : suppressors)
             s->reset();
+        if (noise)
+            noise->reset();
         if (expander)
             expander->reset();
     }
@@ -112,6 +139,7 @@ public:
 private:
     double sr = 48000.0;
     std::vector<std::unique_ptr<FeedbackSuppressor>> suppressors;
+    std::unique_ptr<NoiseSuppressor> noise;
     std::unique_ptr<Expander> expander;
     std::vector<std::vector<double>> scratch;
     std::vector<double*> scratchPtrs;

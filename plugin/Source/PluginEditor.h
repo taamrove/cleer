@@ -238,6 +238,33 @@ struct SpectrumView : juce::Component, juce::Timer
     int notchN = 0;
 };
 
+// Small "voice detected" lamp fed by RNNoise's VAD output.
+struct VoiceLamp : juce::Component, juce::Timer
+{
+    explicit VoiceLamp (CleerAudioProcessor& p) : processor (p) { startTimerHz (15); }
+
+    void timerCallback() override
+    {
+        const float target = processor.uiVoiceProb.load (std::memory_order_relaxed);
+        vad += (target > vad ? 0.6f : 0.25f) * (target - vad);
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat();
+        const float d = r.getHeight() - 4.0f;
+        g.setColour (green.withAlpha (0.15f + 0.85f * juce::jlimit (0.0f, 1.0f, vad)));
+        g.fillEllipse (r.getX(), r.getY() + 2.0f, d, d);
+        g.setColour (textDim);
+        g.setFont (juce::FontOptions (9.5f, juce::Font::bold));
+        g.drawText ("VOICE", r.withTrimmedLeft (d + 5.0f), juce::Justification::centredLeft);
+    }
+
+    CleerAudioProcessor& processor;
+    float vad = 0.0f;
+};
+
 // IN / OUT / GR bars plus the in-vs-out difference readout.
 struct MeterView : juce::Component, juce::Timer
 {
@@ -321,6 +348,8 @@ public:
           fbSens (p.apvts, "fb_sens", "SENS", cleerui::cyan),
           fbDepth (p.apvts, "fb_depth", "DEPTH", cleerui::cyan),
           fbQ (p.apvts, "fb_q", "Q", cleerui::cyan),
+          noiseAmount (p.apvts, "noise_amount", "AMOUNT", cleerui::green),
+          voiceLamp (p),
           gateThresh (p.apvts, "gate_thresh", "THRESH", cleerui::amber),
           gateRatio (p.apvts, "gate_ratio", "RATIO", cleerui::amber),
           gateRange (p.apvts, "gate_range", "RANGE", cleerui::amber),
@@ -332,20 +361,25 @@ public:
 
         addAndMakeVisible (spectrum);
         addAndMakeVisible (meters);
-        for (auto* k : { &fbSens, &fbDepth, &fbQ, &gateThresh, &gateRatio,
+        for (auto* k : { &fbSens, &fbDepth, &fbQ, &noiseAmount, &gateThresh, &gateRatio,
                          &gateRange, &gateAttack, &gateRelease, &gateHold })
             addAndMakeVisible (*k);
+        addAndMakeVisible (voiceLamp);
 
         fbOn.setButtonText ("KILL");
+        noiseOn.setButtonText ("NR");
         gateOn.setButtonText ("GATE");
         addAndMakeVisible (fbOn);
+        addAndMakeVisible (noiseOn);
         addAndMakeVisible (gateOn);
         fbOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
             p.apvts, "fb_on", fbOn);
+        noiseOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
+            p.apvts, "noise_on", noiseOn);
         gateOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
             p.apvts, "gate_on", gateOn);
 
-        setSize (780, 468);
+        setSize (930, 468);
     }
 
     ~CleerAudioProcessorEditor() override { setLookAndFeel (nullptr); }
@@ -364,10 +398,13 @@ public:
         // Section panels behind the knobs.
         g.setColour (cleerui::panel);
         g.fillRoundedRectangle (fbPanel.toFloat(), 6.0f);
+        g.fillRoundedRectangle (noisePanel.toFloat(), 6.0f);
         g.fillRoundedRectangle (gatePanel.toFloat(), 6.0f);
         g.setColour (cleerui::textDim);
         g.setFont (juce::FontOptions (10.0f, juce::Font::bold));
         g.drawText ("FEEDBACK", fbPanel.getX() + 10, fbPanel.getY() + 6, 100, 12,
+                    juce::Justification::left);
+        g.drawText ("NOISE", noisePanel.getX() + 10, noisePanel.getY() + 6, 100, 12,
                     juce::Justification::left);
         g.drawText ("EXPANDER / GATE", gatePanel.getX() + 10, gatePanel.getY() + 6, 140, 12,
                     juce::Justification::left);
@@ -384,7 +421,9 @@ public:
         spectrum.setBounds (top);
 
         area.removeFromTop (10);
-        fbPanel = area.removeFromLeft (272);
+        fbPanel = area.removeFromLeft (252);
+        area.removeFromLeft (10);
+        noisePanel = area.removeFromLeft (150);
         area.removeFromLeft (10);
         gatePanel = area;
 
@@ -399,8 +438,11 @@ public:
         };
 
         layoutPanel (fbPanel, fbOn, { &fbSens, &fbDepth, &fbQ });
+        layoutPanel (noisePanel, noiseOn, { &noiseAmount });
         layoutPanel (gatePanel, gateOn, { &gateThresh, &gateRatio, &gateRange,
                                           &gateAttack, &gateRelease, &gateHold });
+        voiceLamp.setBounds (noisePanel.getX() + 10, noisePanel.getBottom() - 24,
+                             noisePanel.getWidth() - 20, 16);
     }
 
 private:
@@ -410,12 +452,14 @@ private:
     cleerui::MeterView meters;
 
     cleerui::Knob fbSens, fbDepth, fbQ;
+    cleerui::Knob noiseAmount;
+    cleerui::VoiceLamp voiceLamp;
     cleerui::Knob gateThresh, gateRatio, gateRange, gateAttack, gateRelease, gateHold;
 
-    juce::ToggleButton fbOn, gateOn;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> fbOnAtt, gateOnAtt;
+    juce::ToggleButton fbOn, noiseOn, gateOn;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> fbOnAtt, noiseOnAtt, gateOnAtt;
 
-    juce::Rectangle<int> fbPanel, gatePanel;
+    juce::Rectangle<int> fbPanel, noisePanel, gatePanel;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CleerAudioProcessorEditor)
 };

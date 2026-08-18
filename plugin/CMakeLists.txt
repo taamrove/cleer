@@ -26,16 +26,63 @@ option(CLEER_COPY_PLUGIN  "Copy the built plug-in into the user plug-in folders"
 set(CLEER_JUCE_PATH "" CACHE PATH "Path to an existing JUCE checkout (optional)")
 
 # ---------------------------------------------------------------------------
+# RNNoise (xiph.org, BSD-3) — the neural noise-suppression stage. The
+# inference code is vendored in third_party/rnnoise; the trained weights are
+# a 74 MB generated C file, so they are NOT committed — they are fetched once
+# from media.xiph.org at configure time, pinned by the sha256 in model_version
+# (same file upstream uses).
+# ---------------------------------------------------------------------------
+set(RNNOISE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise)
+if (NOT EXISTS "${RNNOISE_DIR}/src/rnnoise_data.c")
+    file(READ "${RNNOISE_DIR}/model_version" RNNOISE_MODEL_HASH)
+    string(STRIP "${RNNOISE_MODEL_HASH}" RNNOISE_MODEL_HASH)
+    set(RNNOISE_MODEL_TGZ "${CMAKE_CURRENT_BINARY_DIR}/rnnoise_data-${RNNOISE_MODEL_HASH}.tar.gz")
+    message(STATUS "Cleer: fetching RNNoise model ${RNNOISE_MODEL_HASH}")
+    file(DOWNLOAD "https://media.xiph.org/rnnoise/models/rnnoise_data-${RNNOISE_MODEL_HASH}.tar.gz"
+         "${RNNOISE_MODEL_TGZ}"
+         EXPECTED_HASH SHA256=${RNNOISE_MODEL_HASH}
+         STATUS RNNOISE_DL_STATUS)
+    list(GET RNNOISE_DL_STATUS 0 RNNOISE_DL_CODE)
+    if (NOT RNNOISE_DL_CODE EQUAL 0)
+        message(FATAL_ERROR "Cleer: RNNoise model download failed: ${RNNOISE_DL_STATUS}")
+    endif()
+    file(ARCHIVE_EXTRACT INPUT "${RNNOISE_MODEL_TGZ}" DESTINATION "${RNNOISE_DIR}")
+endif()
+
+add_library(rnnoise STATIC
+    ${RNNOISE_DIR}/src/denoise.c
+    ${RNNOISE_DIR}/src/rnn.c
+    ${RNNOISE_DIR}/src/nnet.c
+    ${RNNOISE_DIR}/src/nnet_default.c
+    ${RNNOISE_DIR}/src/parse_lpcnet_weights.c
+    ${RNNOISE_DIR}/src/kiss_fft.c
+    ${RNNOISE_DIR}/src/celt_lpc.c
+    ${RNNOISE_DIR}/src/pitch.c
+    ${RNNOISE_DIR}/src/rnnoise_data.c
+    ${RNNOISE_DIR}/src/rnnoise_tables.c)
+target_include_directories(rnnoise PUBLIC ${RNNOISE_DIR}/include PRIVATE ${RNNOISE_DIR}/src)
+set_target_properties(rnnoise PROPERTIES C_STANDARD 99 POSITION_INDEPENDENT_CODE ON)
+if (NOT MSVC)
+    target_compile_options(rnnoise PRIVATE -O2 -w)   # vendored: silence its warnings
+endif()
+
+# ---------------------------------------------------------------------------
 # Offline harness — no JUCE required.
 # ---------------------------------------------------------------------------
 if (CLEER_BUILD_TESTS)
     add_executable(cleer_dsp_tests Tests/DspTests.cpp)
+    target_link_libraries(cleer_dsp_tests PRIVATE rnnoise)
     target_compile_features(cleer_dsp_tests PRIVATE cxx_std_17)
     if (NOT MSVC)
         target_compile_options(cleer_dsp_tests PRIVATE -Wall -Wextra)
     endif()
     enable_testing()
     add_test(NAME cleer_dsp_tests COMMAND cleer_dsp_tests)
+
+    # Offline WAV runner for listening tests on real material.
+    add_executable(cleer_process Tools/process_wav.cpp)
+    target_link_libraries(cleer_process PRIVATE rnnoise)
+    target_compile_features(cleer_process PRIVATE cxx_std_17)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -96,6 +143,7 @@ if (CLEER_BUILD_PLUGIN)
 
     target_link_libraries(Cleer
         PRIVATE
+            rnnoise
             juce::juce_audio_utils
         PUBLIC
             juce::juce_recommended_config_flags

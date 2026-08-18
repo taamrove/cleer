@@ -8,6 +8,8 @@ constexpr auto kFbOn        = "fb_on";
 constexpr auto kFbSens      = "fb_sens";      // prominence threshold, dB above floor
 constexpr auto kFbDepth     = "fb_depth";     // max notch depth, dB
 constexpr auto kFbQ         = "fb_q";
+constexpr auto kNoiseOn     = "noise_on";
+constexpr auto kNoiseAmount = "noise_amount";
 constexpr auto kGateOn      = "gate_on";
 constexpr auto kGateThresh  = "gate_thresh";
 constexpr auto kGateRatio   = "gate_ratio";
@@ -45,6 +47,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout CleerAudioProcessor::createL
         juce::ParameterID { kFbQ, 1 }, "FB Notch Q",
         juce::NormalisableRange<float> (8.0f, 40.0f, 1.0f), 28.0f));
 
+    layout.add (std::make_unique<BoolParam> (juce::ParameterID { kNoiseOn, 1 }, "Noise Removal", true));
+    layout.add (std::make_unique<FloatParam> (
+        juce::ParameterID { kNoiseAmount, 1 }, "Noise Amount",
+        juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 90.0f,
+        juce::AudioParameterFloatAttributes().withLabel ("%")));
+
     layout.add (std::make_unique<BoolParam> (juce::ParameterID { kGateOn, 1 }, "Gate", true));
     layout.add (std::make_unique<FloatParam> (
         juce::ParameterID { kGateThresh, 1 }, "Gate Threshold",
@@ -76,7 +84,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout CleerAudioProcessor::createL
 void CleerAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     engine.prepare (sampleRate, getTotalNumInputChannels(), samplesPerBlock);
-    setLatencySamples (0);   // analysis is a side-chain; the audio path is IIR only
+    // Feedback + gate are latency-free; the RNNoise stage adds ~10 ms of
+    // frame latency while enabled. Reported dynamically when toggled.
+    engine.noiseEnabled = apvts.getRawParameterValue ("noise_on")->load() > 0.5f;
+    setLatencySamples (engine.latencySamples());
 }
 
 bool CleerAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -100,6 +111,14 @@ void CleerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
 
     engine.feedbackEnabled = boolValue (kFbOn);
     engine.gateEnabled = boolValue (kGateOn);
+
+    const bool noiseOn = boolValue (kNoiseOn);
+    if (noiseOn != engine.noiseEnabled)
+    {
+        engine.noiseEnabled = noiseOn;
+        setLatencySamples (engine.latencySamples());
+    }
+    engine.setNoiseMix (value (kNoiseAmount) / 100.0);
 
     cleer::FeedbackSuppressor::Params fb;   // starts at the tuned defaults
     fb.prominenceDB = value (kFbSens);
@@ -133,6 +152,7 @@ void CleerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     uiOutPeakDB.store (juce::Decibels::gainToDecibels (outPeak, -100.0f), std::memory_order_relaxed);
     uiNotchCount.store (engine.activeNotchCount(), std::memory_order_relaxed);
     uiGainReductionDB.store ((float) engine.gainReductionDB(), std::memory_order_relaxed);
+    uiVoiceProb.store (engine.voiceProbability(), std::memory_order_relaxed);
 
     if (const auto* spec = engine.uiSpectrumDB())
     {

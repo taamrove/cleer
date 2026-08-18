@@ -22,3 +22,8 @@ defeedback/
 # Plugin build tree
 plugin/build/
 plugin/JUCE/
+
+# RNNoise trained weights: fetched by plugin/CMakeLists.txt from
+# media.xiph.org, pinned by third_party/rnnoise/model_version
+plugin/third_party/rnnoise/src/rnnoise_data.c
+plugin/third_party/rnnoise/src/rnnoise_data.h

@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <vector>
 #include "../Source/dsp/CleerEngine.h"
+#include "../Source/dsp/NoiseSuppressor.h"
 
 namespace
 {
@@ -62,6 +63,19 @@ void run (cleer::Engine& e, std::vector<float>& x)
     }
 }
 
+std::vector<float> whiteNoise (size_t total, double levelDB, unsigned seed)
+{
+    std::vector<float> x (total);
+    unsigned rng = seed;
+    const double amp = std::pow (10.0, levelDB / 20.0);
+    for (size_t i = 0; i < total; ++i)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        x[i] = (float) (((double) (rng >> 8) / 8388608.0 - 1.0) * amp);
+    }
+    return x;
+}
+
 void testHowlSuppressed()
 {
     // A howl: 1240 Hz sine growing 2.5 dB per hop (5.33 ms) from -70 dBFS,
@@ -89,6 +103,7 @@ void testHowlSuppressed()
     cleer::Engine e;
     e.prepare (kSampleRate, 1, 512);
     e.gateEnabled = false;
+    e.noiseEnabled = false;   // isolate the suppressor
     run (e, x);
 
     const double after = toneDB (x, tail0, tail1, f);
@@ -120,6 +135,7 @@ void testSteadyVocalUntouched()
     cleer::Engine e;
     e.prepare (kSampleRate, 1, 512);
     e.gateEnabled = false;
+    e.noiseEnabled = false;   // RNNoise rightly eats synthetic tones; test the detector alone
     run (e, x);
 
     const double after = rmsDB (x, total / 2, total);
@@ -155,6 +171,7 @@ void testExpander()
     cleer::Engine e;
     e.prepare (kSampleRate, 1, 512);
     e.feedbackEnabled = false;
+    e.noiseEnabled = false;
     run (e, x);
 
     const double loudAfter = rmsDB (x, loud / 2, loud);
@@ -166,6 +183,127 @@ void testExpander()
     check (quietAfter - quietBefore > -30.0, "expander: attenuation clamped near the floor");
 }
 
+void testNoiseSuppressor()
+{
+    // Pure broadband noise at -35 dBFS: RNNoise should hear no voice and
+    // strip most of it. 4 s gives the noise-floor tracker time to settle.
+    const size_t total = (size_t) (4.0 * kSampleRate);
+    auto x = whiteNoise (total, -35.0, 3);
+    const double before = rmsDB (x, total - (size_t) kSampleRate, total);
+
+    cleer::NoiseSuppressor ns;
+    ns.prepare (kSampleRate, 1);
+    std::vector<double> d (x.begin(), x.end());
+    for (size_t i = 0; i < d.size(); i += 512)
+    {
+        double* p = d.data() + i;
+        ns.processBlock (&p, 1, (int) std::min ((size_t) 512, d.size() - i));
+    }
+    std::vector<float> y (d.begin(), d.end());
+
+    const double after = rmsDB (y, total - (size_t) kSampleRate, total);
+    std::printf ("       rnnoise: noise %.1f -> %.1f dB (%.1f dB removed), latency %d\n",
+                 before, after, before - after, ns.latencySamples());
+    check (before - after > 10.0, "rnnoise: broadband noise cut by > 10 dB");
+    check (ns.latencySamples() > 400 && ns.latencySamples() < 600,
+           "rnnoise: latency ~1 frame at 48k");
+}
+
+void testNoiseLatencyAlignment()
+{
+    // With mix = 0 the stage is a pure delay: a sine must come out intact,
+    // shifted by exactly latencySamples().
+    cleer::NoiseSuppressor ns;
+    ns.prepare (kSampleRate, 1);
+    ns.mix = 0.0;
+    const int lat = ns.latencySamples();
+
+    const size_t total = (size_t) kSampleRate;
+    std::vector<double> in (total), out (total);
+    for (size_t i = 0; i < total; ++i)
+        in[i] = 0.5 * std::sin (2.0 * M_PI * 440.0 * (double) i / kSampleRate);
+    out = in;
+    double* p = out.data();
+    for (size_t i = 0; i < total; i += 512)
+    {
+        p = out.data() + i;
+        ns.processBlock (&p, 1, (int) std::min ((size_t) 512, total - i));
+    }
+
+    double maxErr = 0.0;
+    for (size_t i = (size_t) kSampleRate / 2; i < total; ++i)
+        maxErr = std::max (maxErr, std::abs (out[i] - in[i - (size_t) lat]));
+    std::printf ("       alignment: latency %d, max dry-path error %.2e\n", lat, maxErr);
+    check (maxErr < 1e-3, "rnnoise: mix=0 path is a clean delay of latencySamples()");
+}
+
+void testNoiseAmountBoundsAttenuation()
+{
+    // A bare sine is not speech, so RNNoise removes it entirely — which
+    // makes it the perfect probe for the AMOUNT blend: at mix = 0.5 the
+    // output must contain at least the dry half, i.e. the tone can lose at
+    // most 6 dB no matter what the model decides.
+    const size_t total = (size_t) (3.0 * kSampleRate);
+    std::vector<double> d (total);
+    for (size_t i = 0; i < total; ++i)
+        d[i] = 0.15 * std::sin (2.0 * M_PI * 330.0 * (double) i / kSampleRate);
+    std::vector<float> fx (d.begin(), d.end());
+    const double before = toneDB (fx, total / 2, total, 330.0);
+
+    cleer::NoiseSuppressor ns;
+    ns.prepare (kSampleRate, 1);
+    ns.mix = 0.5;
+    for (size_t i = 0; i < total; i += 512)
+    {
+        double* p = d.data() + i;
+        ns.processBlock (&p, 1, (int) std::min ((size_t) 512, total - i));
+    }
+    std::vector<float> fy (d.begin(), d.end());
+    const double after = toneDB (fy, total / 2, total, 330.0);
+    std::printf ("       amount: mix=0.5 keeps tone %.1f -> %.1f dB (>= -6.1)\n", before, after);
+    check (after > before - 6.1, "rnnoise: mix bounds attenuation at 6 dB for mix=0.5");
+}
+
+void testNoiseResampledRate()
+{
+    // 44.1 kHz host: the resampler pair must still deliver noise reduction
+    // and keep a voice-band tone, and latency must scale with the rate.
+    const double sr = 44100.0;
+    cleer::NoiseSuppressor ns;
+    ns.prepare (sr, 1);
+    const int lat = ns.latencySamples();
+
+    const size_t total = (size_t) (4.0 * sr);
+    std::vector<double> d (total);
+    unsigned rng = 23;
+    for (size_t i = 0; i < total; ++i)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        d[i] = ((double) (rng >> 8) / 8388608.0 - 1.0) * std::pow (10.0, -35.0 / 20.0);
+    }
+    std::vector<float> fx (d.begin(), d.end());
+    const double before = 20.0 * std::log10 (1e-12 + [&] {
+        double acc = 0.0;
+        for (size_t i = total - (size_t) sr; i < total; ++i) acc += d[i] * d[i];
+        return std::sqrt (acc / sr);
+    }());
+
+    double* p = d.data();
+    for (size_t i = 0; i < total; i += 441)
+    {
+        p = d.data() + i;
+        ns.processBlock (&p, 1, (int) std::min ((size_t) 441, total - i));
+    }
+    double acc = 0.0;
+    for (size_t i = total - (size_t) sr; i < total; ++i) acc += d[i] * d[i];
+    const double after = 20.0 * std::log10 (1e-12 + std::sqrt (acc / sr));
+
+    std::printf ("       44.1k: noise %.1f -> %.1f dB, latency %d (~%.1f ms)\n",
+                 before, after, lat, 1000.0 * lat / sr);
+    check (before - after > 10.0, "rnnoise 44.1k: noise cut by > 10 dB");
+    check (lat > 380 && lat < 560, "rnnoise 44.1k: latency ~1 frame scaled");
+}
+
 } // namespace
 
 int main()
@@ -173,6 +311,10 @@ int main()
     testHowlSuppressed();
     testSteadyVocalUntouched();
     testExpander();
+    testNoiseSuppressor();
+    testNoiseLatencyAlignment();
+    testNoiseAmountBoundsAttenuation();
+    testNoiseResampledRate();
     std::printf (failures == 0 ? "\nAll tests passed.\n" : "\n%d test(s) FAILED.\n", failures);
     return failures == 0 ? 0 : 1;
 }
