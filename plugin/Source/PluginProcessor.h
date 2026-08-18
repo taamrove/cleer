@@ -48,6 +48,7 @@ public:
     std::atomic<float> uiOutPeakDB { -100.0f };
     std::atomic<float> uiVoiceProb { 0.0f };
     std::array<std::atomic<float>, kSpecBins> uiSpectrumDB {};
+    std::array<std::atomic<float>, kSpecBins> uiSpectrumOutDB {};
     std::array<std::atomic<float>, kMaxUiNotches> uiNotchFreq {};
     std::array<std::atomic<float>, kMaxUiNotches> uiNotchDepth {};
     std::atomic<int> uiNotchN { 0 };

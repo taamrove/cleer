@@ -10,7 +10,11 @@ constexpr auto kFbDepth     = "fb_depth";     // max notch depth, dB
 constexpr auto kFbQ         = "fb_q";
 constexpr auto kNoiseOn     = "noise_on";
 constexpr auto kNoiseAmount = "noise_amount";
+constexpr auto kDvOn        = "dv_on";
+constexpr auto kDvAmount    = "dv_amount";
+constexpr auto kDvRt60      = "dv_rt60";
 constexpr auto kGateOn      = "gate_on";
+constexpr auto kGateSmart   = "gate_smart";
 constexpr auto kGateThresh  = "gate_thresh";
 constexpr auto kGateRatio   = "gate_ratio";
 constexpr auto kGateRange   = "gate_range";   // max attenuation, dB (maps to -floorDB)
@@ -53,7 +57,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout CleerAudioProcessor::createL
         juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 90.0f,
         juce::AudioParameterFloatAttributes().withLabel ("%")));
 
+    layout.add (std::make_unique<BoolParam> (juce::ParameterID { kDvOn, 1 }, "Dereverb", false));
+    layout.add (std::make_unique<FloatParam> (
+        juce::ParameterID { kDvAmount, 1 }, "Reverb Amount",
+        juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 60.0f,
+        juce::AudioParameterFloatAttributes().withLabel ("%")));
+    layout.add (std::make_unique<FloatParam> (
+        juce::ParameterID { kDvRt60, 1 }, "Room RT60",
+        juce::NormalisableRange<float> (0.2f, 1.5f, 0.05f), 0.6f,
+        juce::AudioParameterFloatAttributes().withLabel ("s")));
+
     layout.add (std::make_unique<BoolParam> (juce::ParameterID { kGateOn, 1 }, "Gate", true));
+    layout.add (std::make_unique<BoolParam> (juce::ParameterID { kGateSmart, 1 }, "Gate Voice Mode", true));
     layout.add (std::make_unique<FloatParam> (
         juce::ParameterID { kGateThresh, 1 }, "Gate Threshold",
         juce::NormalisableRange<float> (-70.0f, -20.0f, 0.5f), -42.0f,
@@ -87,6 +102,7 @@ void CleerAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     // Feedback + gate are latency-free; the RNNoise stage adds ~10 ms of
     // frame latency while enabled. Reported dynamically when toggled.
     engine.noiseEnabled = apvts.getRawParameterValue ("noise_on")->load() > 0.5f;
+    engine.dereverbEnabled = apvts.getRawParameterValue ("dv_on")->load() > 0.5f;
     setLatencySamples (engine.latencySamples());
 }
 
@@ -113,12 +129,20 @@ void CleerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     engine.gateEnabled = boolValue (kGateOn);
 
     const bool noiseOn = boolValue (kNoiseOn);
-    if (noiseOn != engine.noiseEnabled)
+    const bool dvOn = boolValue (kDvOn);
+    if (noiseOn != engine.noiseEnabled || dvOn != engine.dereverbEnabled)
     {
         engine.noiseEnabled = noiseOn;
+        engine.dereverbEnabled = dvOn;
         setLatencySamples (engine.latencySamples());
     }
     engine.setNoiseMix (value (kNoiseAmount) / 100.0);
+    engine.gateSmart = boolValue (kGateSmart);
+
+    cleer::DereverbStage::Params dv;
+    dv.strength = value (kDvAmount) / 100.0;
+    dv.rt60 = value (kDvRt60);
+    engine.setDereverbParams (dv);
 
     cleer::FeedbackSuppressor::Params fb;   // starts at the tuned defaults
     fb.prominenceDB = value (kFbSens);
@@ -159,6 +183,12 @@ void CleerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         const int nb = std::min (kSpecBins, (int) spec->size());
         for (int k = 0; k < nb; ++k)
             uiSpectrumDB[(size_t) k].store ((float) (*spec)[(size_t) k], std::memory_order_relaxed);
+    }
+    if (const auto* spec = engine.uiSpectrumOutDB())
+    {
+        const int nb = std::min (kSpecBins, (int) spec->size());
+        for (int k = 0; k < nb; ++k)
+            uiSpectrumOutDB[(size_t) k].store ((float) (*spec)[(size_t) k], std::memory_order_relaxed);
     }
 
     float nf[kMaxUiNotches], nd[kMaxUiNotches];

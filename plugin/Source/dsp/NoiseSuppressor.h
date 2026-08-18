@@ -51,6 +51,11 @@ public:
     bool enabled = true;
     double mix = 1.0;          // 0 = dry (still delayed), 1 = fully denoised
 
+    // Analysis-only mode: run the network for its VAD output but leave the
+    // audio untouched (no output substitution, no FIFO, no latency). Used
+    // by the smart gate when the noise-removal stage itself is bypassed.
+    bool outputEnabled = true;
+
     int latencySamples() const { return latency; }
 
     // Voice-activity probability from the last processed frame (channel 0).
@@ -172,17 +177,19 @@ private:
                     const float vad = rnnoise_process_frame (c.state, c.wet.data(), c.frameScaled.data());
                     if (trackVad)
                         lastVad = vad;
-                    for (int k = 0; k < frameSize; ++k)
-                    {
-                        const double wet = (double) c.wet[(size_t) k] / 32768.0;
-                        const double blended = mix * wet + (1.0 - mix) * c.frameOrig[(size_t) k];
-                        c.down.push (blended);
-                        while (c.down.ready())
-                            fifoPush (c, c.down.read());
-                    }
+                    if (outputEnabled)
+                        for (int k = 0; k < frameSize; ++k)
+                        {
+                            const double wet = (double) c.wet[(size_t) k] / 32768.0;
+                            const double blended = mix * wet + (1.0 - mix) * c.frameOrig[(size_t) k];
+                            c.down.push (blended);
+                            while (c.down.ready())
+                                fifoPush (c, c.down.read());
+                        }
                 }
             }
-            x[i] = fifoPop (c);
+            if (outputEnabled)
+                x[i] = fifoPop (c);
         }
     }
 

@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <vector>
 #include "../Source/dsp/CleerEngine.h"
+#include "../Source/dsp/Dereverb.h"
 #include "../Source/dsp/NoiseSuppressor.h"
 
 namespace
@@ -304,6 +305,153 @@ void testNoiseResampledRate()
     check (lat > 380 && lat < 560, "rnnoise 44.1k: latency ~1 frame scaled");
 }
 
+void testDereverb()
+{
+    // Speech-burst-like tone bursts convolved with a synthetic room
+    // (exponentially decaying noise IR, RT60 ~0.5 s). The dereverb stage
+    // must pull the inter-burst reverb tail down without wrecking the
+    // bursts themselves.
+    const double rt60 = 0.5;
+    const size_t irLen = (size_t) (0.4 * kSampleRate);
+    std::vector<double> ir (irLen);
+    unsigned rng = 5;
+    for (size_t i = 0; i < irLen; ++i)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        const double t = (double) i / kSampleRate;
+        ir[i] = ((double) (rng >> 8) / 8388608.0 - 1.0) * std::pow (10.0, -3.0 * t / rt60) * 0.05;
+    }
+    ir[0] = 1.0;   // direct path
+
+    // Dry: 0.4 s bursts of a 300 Hz + harmonics tone, 0.6 s gaps, 6 s total.
+    const size_t total = (size_t) (6.0 * kSampleRate);
+    std::vector<double> dry (total, 0.0);
+    for (size_t i = 0; i < total; ++i)
+    {
+        const double t = (double) i / kSampleRate;
+        const double phase = std::fmod (t, 1.0);
+        if (phase < 0.4)
+        {
+            const double env = std::min (1.0, std::min (phase / 0.02, (0.4 - phase) / 0.02));
+            dry[i] = env * 0.2 * (std::sin (2.0 * M_PI * 300.0 * t)
+                                + 0.5 * std::sin (2.0 * M_PI * 600.0 * t));
+        }
+    }
+    // Convolve (sparse-ish: only every 4th IR tap to keep the test fast).
+    std::vector<double> wet (total, 0.0);
+    for (size_t i = 0; i < total; ++i)
+        if (dry[i] != 0.0)
+            for (size_t k = 0; k < irLen && i + k < total; k += 4)
+                wet[i + k] += dry[i] * ir[k] * 4.0 * 0.25;
+
+    // Tail windows: 150-400 ms after each burst ends (bursts end at 0.4+n).
+    auto tailRms = [&] (const std::vector<double>& x) {
+        double acc = 0.0;
+        size_t cnt = 0;
+        for (int b = 1; b < 5; ++b)
+        {
+            const size_t a = (size_t) ((b + 0.55) * kSampleRate);
+            const size_t e = (size_t) ((b + 0.80) * kSampleRate);
+            for (size_t i = a; i < e; ++i, ++cnt)
+                acc += x[i] * x[i];
+        }
+        return 20.0 * std::log10 (std::sqrt (acc / (double) cnt) + 1e-12);
+    };
+
+    const double tailBefore = tailRms (wet);
+
+    cleer::DereverbStage dv;
+    cleer::DereverbStage::Params dp;
+    dp.rt60 = rt60;
+    dp.strength = 1.0;
+    dv.prepare (kSampleRate, 1);
+    dv.setParams (dp);
+    dv.enabled = true;
+    std::vector<double> proc = wet;
+    for (size_t i = 0; i < total; i += 512)
+    {
+        double* p = proc.data() + i;
+        dv.processBlock (&p, 1, (int) std::min ((size_t) 512, total - i));
+    }
+    // Latency-compensate before windowed measurement.
+    const int lat = dv.latencySamples();
+    proc.erase (proc.begin(), proc.begin() + lat);
+    proc.resize (total, 0.0);
+
+    const double tailAfter = tailRms (proc);
+    std::printf ("       dereverb: tail %.1f -> %.1f dB (%.1f dB removed), latency %d\n",
+                 tailBefore, tailAfter, tailBefore - tailAfter, lat);
+    check (tailBefore - tailAfter > 3.0, "dereverb: reverb tail cut by > 3 dB");
+    check (lat > 900 && lat < 1200, "dereverb: latency ~1024 samples");
+}
+
+void testDereverbBypassClean()
+{
+    // strength = 0 must be a bit-clean delay (COLA identity through the
+    // OLA STFT round trip).
+    cleer::DereverbStage dv;
+    cleer::DereverbStage::Params dp;
+    dp.strength = 0.0;
+    dp.gainFloorDB = -60.0;   // floor must not bite with zero subtraction
+    dv.prepare (kSampleRate, 1);
+    dv.setParams (dp);
+    dv.enabled = true;
+    const int lat = dv.latencySamples();
+
+    const size_t total = (size_t) kSampleRate;
+    std::vector<double> in (total), out (total);
+    for (size_t i = 0; i < total; ++i)
+        in[i] = 0.4 * std::sin (2.0 * M_PI * 523.0 * (double) i / kSampleRate);
+    out = in;
+    for (size_t i = 0; i < total; i += 512)
+    {
+        double* p = out.data() + i;
+        dv.processBlock (&p, 1, (int) std::min ((size_t) 512, total - i));
+    }
+    double maxErr = 0.0;
+    for (size_t i = total / 2; i < total; ++i)
+        maxErr = std::max (maxErr, std::abs (out[i] - in[i - (size_t) lat]));
+    std::printf ("       dereverb bypass: latency %d, max error %.2e\n", lat, maxErr);
+    check (maxErr < 1e-6, "dereverb: strength=0 is a clean COLA delay");
+}
+
+void testSmartGate()
+{
+    // The mechanism, isolated from RNNoise: with the envelope sitting
+    // between the two VAD-shifted thresholds, the gate must be OPEN when
+    // the VAD says voice and CLOSED when it says none. Signal at -40 dB,
+    // static threshold -42 dB: plain mode keeps it open; smart mode with
+    // vad=0 shifts the threshold to -30 dB and closes it.
+    auto runCase = [] (bool smart, double vad) {
+        cleer::Expander ex (kSampleRate);
+        cleer::Expander::Params p;
+        p.thresholdDB = -42.0;
+        p.holdMs = 0.0;
+        ex.setParams (p);
+        ex.smart = smart;
+        ex.setVoiceProbability (vad);
+        const size_t total = (size_t) kSampleRate;
+        std::vector<double> d (total);
+        for (size_t i = 0; i < total; ++i)
+            d[i] = 0.01 * std::sin (2.0 * M_PI * 500.0 * (double) i / kSampleRate);   // -40 dB
+        double* ptr = d.data();
+        ex.processBlock (&ptr, 1, (int) total);
+        double acc = 0.0;
+        for (size_t i = total / 2; i < total; ++i)
+            acc += d[i] * d[i];
+        return 20.0 * std::log10 (std::sqrt (acc / (total / 2.0)) + 1e-12);
+    };
+
+    const double plain = runCase (false, 0.0);
+    const double voiceless = runCase (true, 0.0);
+    const double voiced = runCase (true, 1.0);
+    std::printf ("       smart gate: plain %.1f, vad=0 %.1f, vad=1 %.1f dB\n",
+                 plain, voiceless, voiced);
+    check (plain > -44.0, "smart gate: plain mode leaves -40 dB signal open");
+    check (voiceless < plain - 10.0, "smart gate: vad=0 closes on the same signal");
+    check (voiced > -44.0, "smart gate: vad=1 keeps it open");
+}
+
 } // namespace
 
 int main()
@@ -315,6 +463,9 @@ int main()
     testNoiseLatencyAlignment();
     testNoiseAmountBoundsAttenuation();
     testNoiseResampledRate();
+    testDereverb();
+    testDereverbBypassClean();
+    testSmartGate();
     std::printf (failures == 0 ? "\nAll tests passed.\n" : "\n%d test(s) FAILED.\n", failures);
     return failures == 0 ? 0 : 1;
 }

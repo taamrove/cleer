@@ -128,6 +128,7 @@ struct SpectrumView : juce::Component, juce::Timer
     explicit SpectrumView (CleerAudioProcessor& p) : processor (p)
     {
         smoothed.fill (-100.0f);
+        smoothedOut.fill (-100.0f);
         setOpaque (true);
         startTimerHz (30);
     }
@@ -141,6 +142,10 @@ struct SpectrumView : juce::Component, juce::Timer
             const float v = processor.uiSpectrumDB[(size_t) k].load (std::memory_order_relaxed) - offset;
             float& s = smoothed[(size_t) k];
             s += (v > s ? 0.55f : 0.20f) * (v - s);   // fast rise, slow fall
+
+            const float vo = processor.uiSpectrumOutDB[(size_t) k].load (std::memory_order_relaxed) - offset;
+            float& so = smoothedOut[(size_t) k];
+            so += (vo > so ? 0.55f : 0.20f) * (vo - so);
         }
         notchN = juce::jmin (processor.uiNotchN.load (std::memory_order_relaxed),
                              CleerAudioProcessor::kMaxUiNotches);
@@ -183,37 +188,61 @@ struct SpectrumView : juce::Component, juce::Timer
             g.drawHorizontalLine ((int) dbToY (db), x0, x0 + w);
         }
 
-        // Spectrum: one point per pixel column, max of the bins mapping there.
+        // Spectra: one point per pixel column, max of the bins mapping there.
+        // Input is the dim reference line; output is the bright filled trace,
+        // so the gap between them is literally what the chain removed.
         const double sr = processor.getSampleRate() > 0.0 ? processor.getSampleRate() : 48000.0;
-        juce::Path path;
-        bool started = false;
-        float prevX = -10.0f, colMax = dbLo;
-        for (int k = 1; k < CleerAudioProcessor::kSpecBins; ++k)
+        auto buildPath = [&] (const std::array<float, CleerAudioProcessor::kSpecBins>& src,
+                              juce::Path& path, float& lastX)
         {
-            const float f = (float) (k * sr / 1024.0);
-            if (f < 40.0f || f > 20000.0f)
-                continue;
-            const float x = freqToX (f, x0, w);
-            colMax = juce::jmax (colMax, smoothed[(size_t) k]);
-            if (x - prevX < 1.0f)
-                continue;
-            const float y = dbToY (colMax);
-            if (! started) { path.startNewSubPath (x, y); started = true; }
-            else            path.lineTo (x, y);
-            prevX = x;
-            colMax = dbLo;
+            bool started = false;
+            float prevX = -10.0f, colMax = dbLo;
+            for (int k = 1; k < CleerAudioProcessor::kSpecBins; ++k)
+            {
+                const float f = (float) (k * sr / 1024.0);
+                if (f < 40.0f || f > 20000.0f)
+                    continue;
+                const float x = freqToX (f, x0, w);
+                colMax = juce::jmax (colMax, src[(size_t) k]);
+                if (x - prevX < 1.0f)
+                    continue;
+                const float y = dbToY (colMax);
+                if (! started) { path.startNewSubPath (x, y); started = true; }
+                else            path.lineTo (x, y);
+                prevX = x;
+                colMax = dbLo;
+            }
+            lastX = prevX;
+        };
+
+        juce::Path inPath, outPath;
+        float inEnd = x0, outEnd = x0;
+        buildPath (smoothed, inPath, inEnd);
+        buildPath (smoothedOut, outPath, outEnd);
+
+        if (! inPath.isEmpty())
+        {
+            g.setColour (textDim.withAlpha (0.75f));
+            g.strokePath (inPath, juce::PathStrokeType (1.0f));
         }
-        if (started)
+        if (! outPath.isEmpty())
         {
-            juce::Path fill (path);
-            fill.lineTo (prevX, yTop + h);
+            juce::Path fill (outPath);
+            fill.lineTo (outEnd, yTop + h);
             fill.lineTo (x0, yTop + h);
             fill.closeSubPath();
-            g.setColour (cyan.withAlpha (0.10f));
+            g.setColour (cyan.withAlpha (0.12f));
             g.fillPath (fill);
-            g.setColour (cyan.withAlpha (0.85f));
-            g.strokePath (path, juce::PathStrokeType (1.4f));
+            g.setColour (cyan.withAlpha (0.9f));
+            g.strokePath (outPath, juce::PathStrokeType (1.4f));
         }
+
+        // Legend.
+        g.setFont (juce::FontOptions (9.0f, juce::Font::bold));
+        g.setColour (textDim);
+        g.drawText ("IN", (int) (x0 + w) - 58, (int) yTop + 2, 22, 11, juce::Justification::left);
+        g.setColour (cyan);
+        g.drawText ("OUT", (int) (x0 + w) - 34, (int) yTop + 2, 30, 11, juce::Justification::left);
 
         // Notch markers: line down from the top, brightness follows depth.
         for (int i = 0; i < notchN; ++i)
@@ -233,7 +262,7 @@ struct SpectrumView : juce::Component, juce::Timer
     }
 
     CleerAudioProcessor& processor;
-    std::array<float, CleerAudioProcessor::kSpecBins> smoothed {};
+    std::array<float, CleerAudioProcessor::kSpecBins> smoothed {}, smoothedOut {};
     std::array<float, CleerAudioProcessor::kMaxUiNotches> notchFreq {}, notchDepth {};
     int notchN = 0;
 };
@@ -350,6 +379,8 @@ public:
           fbQ (p.apvts, "fb_q", "Q", cleerui::cyan),
           noiseAmount (p.apvts, "noise_amount", "AMOUNT", cleerui::green),
           voiceLamp (p),
+          dvAmount (p.apvts, "dv_amount", "AMOUNT", cleerui::red),
+          dvRt60 (p.apvts, "dv_rt60", "RT60", cleerui::red),
           gateThresh (p.apvts, "gate_thresh", "THRESH", cleerui::amber),
           gateRatio (p.apvts, "gate_ratio", "RATIO", cleerui::amber),
           gateRange (p.apvts, "gate_range", "RANGE", cleerui::amber),
@@ -361,25 +392,33 @@ public:
 
         addAndMakeVisible (spectrum);
         addAndMakeVisible (meters);
-        for (auto* k : { &fbSens, &fbDepth, &fbQ, &noiseAmount, &gateThresh, &gateRatio,
-                         &gateRange, &gateAttack, &gateRelease, &gateHold })
+        for (auto* k : { &fbSens, &fbDepth, &fbQ, &noiseAmount, &dvAmount, &dvRt60,
+                         &gateThresh, &gateRatio, &gateRange, &gateAttack, &gateRelease, &gateHold })
             addAndMakeVisible (*k);
         addAndMakeVisible (voiceLamp);
 
         fbOn.setButtonText ("KILL");
         noiseOn.setButtonText ("NR");
+        dvOn.setButtonText ("DV");
         gateOn.setButtonText ("GATE");
+        gateSmart.setButtonText ("SMART");
         addAndMakeVisible (fbOn);
         addAndMakeVisible (noiseOn);
+        addAndMakeVisible (dvOn);
         addAndMakeVisible (gateOn);
+        addAndMakeVisible (gateSmart);
         fbOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
             p.apvts, "fb_on", fbOn);
         noiseOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
             p.apvts, "noise_on", noiseOn);
+        dvOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
+            p.apvts, "dv_on", dvOn);
         gateOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
             p.apvts, "gate_on", gateOn);
+        gateSmartAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
+            p.apvts, "gate_smart", gateSmart);
 
-        setSize (930, 468);
+        setSize (1120, 468);
     }
 
     ~CleerAudioProcessorEditor() override { setLookAndFeel (nullptr); }
@@ -399,12 +438,15 @@ public:
         g.setColour (cleerui::panel);
         g.fillRoundedRectangle (fbPanel.toFloat(), 6.0f);
         g.fillRoundedRectangle (noisePanel.toFloat(), 6.0f);
+        g.fillRoundedRectangle (dvPanel.toFloat(), 6.0f);
         g.fillRoundedRectangle (gatePanel.toFloat(), 6.0f);
         g.setColour (cleerui::textDim);
         g.setFont (juce::FontOptions (10.0f, juce::Font::bold));
         g.drawText ("FEEDBACK", fbPanel.getX() + 10, fbPanel.getY() + 6, 100, 12,
                     juce::Justification::left);
         g.drawText ("NOISE", noisePanel.getX() + 10, noisePanel.getY() + 6, 100, 12,
+                    juce::Justification::left);
+        g.drawText ("REVERB", dvPanel.getX() + 10, dvPanel.getY() + 6, 100, 12,
                     juce::Justification::left);
         g.drawText ("EXPANDER / GATE", gatePanel.getX() + 10, gatePanel.getY() + 6, 140, 12,
                     juce::Justification::left);
@@ -423,7 +465,9 @@ public:
         area.removeFromTop (10);
         fbPanel = area.removeFromLeft (252);
         area.removeFromLeft (10);
-        noisePanel = area.removeFromLeft (150);
+        noisePanel = area.removeFromLeft (140);
+        area.removeFromLeft (10);
+        dvPanel = area.removeFromLeft (180);
         area.removeFromLeft (10);
         gatePanel = area;
 
@@ -439,8 +483,10 @@ public:
 
         layoutPanel (fbPanel, fbOn, { &fbSens, &fbDepth, &fbQ });
         layoutPanel (noisePanel, noiseOn, { &noiseAmount });
+        layoutPanel (dvPanel, dvOn, { &dvAmount, &dvRt60 });
         layoutPanel (gatePanel, gateOn, { &gateThresh, &gateRatio, &gateRange,
                                           &gateAttack, &gateRelease, &gateHold });
+        gateSmart.setBounds (gatePanel.getRight() - 128, gatePanel.getY() + 6, 58, 20);
         voiceLamp.setBounds (noisePanel.getX() + 10, noisePanel.getBottom() - 24,
                              noisePanel.getWidth() - 20, 16);
     }
@@ -454,12 +500,14 @@ private:
     cleerui::Knob fbSens, fbDepth, fbQ;
     cleerui::Knob noiseAmount;
     cleerui::VoiceLamp voiceLamp;
+    cleerui::Knob dvAmount, dvRt60;
     cleerui::Knob gateThresh, gateRatio, gateRange, gateAttack, gateRelease, gateHold;
 
-    juce::ToggleButton fbOn, noiseOn, gateOn;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> fbOnAtt, noiseOnAtt, gateOnAtt;
+    juce::ToggleButton fbOn, noiseOn, dvOn, gateOn, gateSmart;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> fbOnAtt, noiseOnAtt,
+        dvOnAtt, gateOnAtt, gateSmartAtt;
 
-    juce::Rectangle<int> fbPanel, noisePanel, gatePanel;
+    juce::Rectangle<int> fbPanel, noisePanel, dvPanel, gatePanel;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CleerAudioProcessorEditor)
 };

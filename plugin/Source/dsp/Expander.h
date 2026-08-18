@@ -60,17 +60,44 @@ public:
     const Params& getParams() const { return params; }
     bool enabled = true;
 
+    // Voice-adaptive ("smart") mode: the neural VAD from the noise stage
+    // slides the effective threshold by up to +/-kVoiceSwingDB. When the
+    // model hears voice the gate is 12 dB more permissive (keeps breaths
+    // and phrase tails); when it hears none the gate is 12 dB stricter, so
+    // bleed louder than the static threshold still gets pulled down. This
+    // is what makes the gate track *the vocal* rather than a level.
+    bool smart = false;
+    static constexpr double kVoiceSwingDB = 12.0;
+
+    void setVoiceProbability (double p)
+    {
+        vadTarget = p < 0.0 ? 0.0 : (p > 1.0 ? 1.0 : p);
+    }
+
     // Process numCh channel pointers of n samples in place with a shared gain.
     void processBlock (double* const* ch, int numCh, int n)
     {
         if (! enabled || numCh <= 0)
             return;
 
-        const double thrLin = std::pow (10.0, params.thresholdDB / 20.0);
         const double rm1 = params.ratio - 1.0;
+        double thrLin = std::pow (10.0, params.thresholdDB / 20.0);
+        double thrDB = params.thresholdDB;
 
         for (int i = 0; i < n; ++i)
         {
+            if (smart)
+            {
+                // ~30 ms one-pole toward the frame-rate VAD value.
+                vadSmoothed += vadCoeff * (vadTarget - vadSmoothed);
+                const double d = params.thresholdDB - kVoiceSwingDB * (2.0 * vadSmoothed - 1.0);
+                if (std::abs (d - thrDB) > 0.01)
+                {
+                    thrDB = d;
+                    thrLin = std::pow (10.0, d / 20.0);
+                }
+            }
+
             double absX = 0.0;
             for (int c = 0; c < numCh; ++c)
                 absX = std::max (absX, std::abs (ch[c][i]));
@@ -85,7 +112,7 @@ public:
             if (env < thrLin)
             {
                 const double envDB = 20.0 * std::log10 (env + 1e-12);
-                const double gainDB = rm1 * (envDB - params.thresholdDB);
+                const double gainDB = rm1 * (envDB - thrDB);
                 targetGain = std::pow (10.0, gainDB / 20.0);
                 if (targetGain < floorLinear)
                     targetGain = floorLinear;
@@ -120,6 +147,8 @@ public:
         env = 0.0;
         gain = 1.0;
         holdSamples = 0;
+        vadSmoothed = 0.0;
+        vadTarget = 0.0;
     }
 
 private:
@@ -131,6 +160,7 @@ private:
         gainReleaseCoeff = onePole (params.releaseMs);
         holdLengthSamples = (int) (params.holdMs * 0.001 * sampleRate);
         floorLinear = std::pow (10.0, params.floorDB / 20.0);
+        vadCoeff = 1.0 - onePole (30.0);
     }
 
     double onePole (double ms) const
@@ -150,6 +180,7 @@ private:
     double gainAttackCoeff = 0.0, gainReleaseCoeff = 0.0;
     int holdLengthSamples = 0;
     double floorLinear = 0.0;
+    double vadTarget = 0.0, vadSmoothed = 0.0, vadCoeff = 0.001;
 };
 
 } // namespace cleer
