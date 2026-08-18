@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace cleer
 {
@@ -30,11 +31,15 @@ public:
         double envAttackMs = 1.0;    // peak follower attack
         double envReleaseMs = 30.0;  // peak follower release
 
-        bool operator== (const Params& o) const
+        // Change detection for cheap coefficient recompution — exact bit
+        // equality is the right test here, epsilon would just delay updates.
+        bool sameAs (const Params& o) const
         {
-            return thresholdDB == o.thresholdDB && ratio == o.ratio && floorDB == o.floorDB
-                && attackMs == o.attackMs && releaseMs == o.releaseMs && holdMs == o.holdMs
-                && envAttackMs == o.envAttackMs && envReleaseMs == o.envReleaseMs;
+            auto eq = [] (double a, double b) { return std::memcmp (&a, &b, sizeof a) == 0; };
+            return eq (thresholdDB, o.thresholdDB) && eq (ratio, o.ratio)
+                && eq (floorDB, o.floorDB) && eq (attackMs, o.attackMs)
+                && eq (releaseMs, o.releaseMs) && eq (holdMs, o.holdMs)
+                && eq (envAttackMs, o.envAttackMs) && eq (envReleaseMs, o.envReleaseMs);
         }
     };
 
@@ -45,7 +50,7 @@ public:
 
     void setParams (const Params& p)
     {
-        if (! (p == params))
+        if (! p.sameAs (params))
         {
             params = p;
             recompute();

@@ -77,6 +77,17 @@ public:
         }
     }
 
+    // UI snapshots (audio thread; channel 0 drives the display).
+    const std::vector<double>* uiSpectrumDB() const
+    {
+        return suppressors.empty() ? nullptr : &suppressors[0]->lastPowerDB();
+    }
+
+    int uiNotches (float* freqs, float* depths, int maxN) const
+    {
+        return suppressors.empty() ? 0 : suppressors[0]->snapshotNotches (freqs, depths, maxN);
+    }
+
     int activeNotchCount() const
     {
         int c = 0;

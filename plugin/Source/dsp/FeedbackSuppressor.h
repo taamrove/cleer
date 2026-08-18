@@ -48,7 +48,7 @@ public:
     {
         persist.assign ((size_t) bins, 0.0);
         prevPowerDB.assign ((size_t) bins, -120.0);
-        powerDB.assign ((size_t) bins, 0.0);
+        powerDB.assign ((size_t) bins, -120.0);
         floorDB.assign ((size_t) bins, 0.0);
         prefix.assign ((size_t) bins + 1, 0.0);
         hopBuf.assign ((size_t) hop, 0.0);
@@ -68,6 +68,13 @@ public:
             {
                 hopFill = 0;
                 const auto& mags = analyzer.push (hopBuf.data());
+                // Power spectrum updates even when disabled so a UI fed from
+                // lastPowerDB() stays live while the suppressor is bypassed.
+                for (int k = 0; k < bins; ++k)
+                {
+                    const double p = mags[(size_t) k] * mags[(size_t) k] + 1e-12;
+                    powerDB[(size_t) k] = 10.0 * std::log10 (p);
+                }
                 if (enabled)
                     updateNotches (mags);
             }
@@ -80,6 +87,24 @@ public:
                 x[i] = s;
             }
         }
+    }
+
+    // UI snapshot helpers — called from the audio thread only; the caller
+    // copies the results into whatever thread-safe storage its UI reads.
+    const std::vector<double>& lastPowerDB() const { return powerDB; }
+
+    int snapshotNotches (float* freqs, float* depths, int maxN) const
+    {
+        int n = 0;
+        for (const auto& nt : notches)
+        {
+            if (n >= maxN)
+                break;
+            freqs[n] = (float) nt.freq;
+            depths[n] = (float) nt.depthDB;
+            ++n;
+        }
+        return n;
     }
 
     int activeNotchCount() const
@@ -115,13 +140,7 @@ private:
 
     void updateNotches (const std::vector<double>& mags)
     {
-        // 1. Power in dB.
-        for (int k = 0; k < bins; ++k)
-        {
-            const double p = mags[(size_t) k] * mags[(size_t) k] + 1e-12;
-            powerDB[(size_t) k] = 10.0 * std::log10 (p);
-        }
-
+        // 1. powerDB was just refreshed by processBlock at the hop boundary.
         // 2. Broadband floor via O(n) sliding mean (prefix sums).
         slidingMean (powerDB, floorDB, params.floorWidthBins / 2);
 

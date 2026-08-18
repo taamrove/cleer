@@ -1,4 +1,6 @@
 #pragma once
+#include <array>
+#include <atomic>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "dsp/CleerEngine.h"
 
@@ -35,9 +37,19 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
-    // For the editor's meters.
+    // Shared state for the editor, written from the audio thread with relaxed
+    // atomics (metering data — freshness matters, ordering doesn't).
+    static constexpr int kSpecBins = 513;   // win 1024 / 2 + 1
+    static constexpr int kMaxUiNotches = 16;
+
     std::atomic<int> uiNotchCount { 0 };
     std::atomic<float> uiGainReductionDB { 0.0f };
+    std::atomic<float> uiInPeakDB { -100.0f };
+    std::atomic<float> uiOutPeakDB { -100.0f };
+    std::array<std::atomic<float>, kSpecBins> uiSpectrumDB {};
+    std::array<std::atomic<float>, kMaxUiNotches> uiNotchFreq {};
+    std::array<std::atomic<float>, kMaxUiNotches> uiNotchDepth {};
+    std::atomic<int> uiNotchN { 0 };
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();

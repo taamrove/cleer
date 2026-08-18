@@ -116,11 +116,39 @@ void CleerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     ex.holdMs = value (kGateHold);
     engine.setExpanderParams (ex);
 
-    engine.processBlock (buffer.getArrayOfWritePointers(),
-                         buffer.getNumChannels(), buffer.getNumSamples());
+    const int numCh = buffer.getNumChannels();
+    const int n = buffer.getNumSamples();
 
+    float inPeak = 0.0f;
+    for (int c = 0; c < numCh; ++c)
+        inPeak = std::max (inPeak, buffer.getMagnitude (c, 0, n));
+
+    engine.processBlock (buffer.getArrayOfWritePointers(), numCh, n);
+
+    float outPeak = 0.0f;
+    for (int c = 0; c < numCh; ++c)
+        outPeak = std::max (outPeak, buffer.getMagnitude (c, 0, n));
+
+    uiInPeakDB.store (juce::Decibels::gainToDecibels (inPeak, -100.0f), std::memory_order_relaxed);
+    uiOutPeakDB.store (juce::Decibels::gainToDecibels (outPeak, -100.0f), std::memory_order_relaxed);
     uiNotchCount.store (engine.activeNotchCount(), std::memory_order_relaxed);
     uiGainReductionDB.store ((float) engine.gainReductionDB(), std::memory_order_relaxed);
+
+    if (const auto* spec = engine.uiSpectrumDB())
+    {
+        const int nb = std::min (kSpecBins, (int) spec->size());
+        for (int k = 0; k < nb; ++k)
+            uiSpectrumDB[(size_t) k].store ((float) (*spec)[(size_t) k], std::memory_order_relaxed);
+    }
+
+    float nf[kMaxUiNotches], nd[kMaxUiNotches];
+    const int nn = engine.uiNotches (nf, nd, kMaxUiNotches);
+    for (int i = 0; i < nn; ++i)
+    {
+        uiNotchFreq[(size_t) i].store (nf[i], std::memory_order_relaxed);
+        uiNotchDepth[(size_t) i].store (nd[i], std::memory_order_relaxed);
+    }
+    uiNotchN.store (nn, std::memory_order_relaxed);
 }
 
 void CleerAudioProcessor::getStateInformation (juce::MemoryBlock& destData)

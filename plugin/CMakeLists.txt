@@ -79,6 +79,8 @@ if (CLEER_BUILD_PLUGIN)
         NEEDS_MIDI_OUTPUT         FALSE
         IS_MIDI_EFFECT            FALSE
         EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+        MICROPHONE_PERMISSION_ENABLED TRUE
+        MICROPHONE_PERMISSION_TEXT    "Cleer processes live audio input (standalone mode)."
         COPY_PLUGIN_AFTER_BUILD   ${CLEER_COPY_PLUGIN}
         VST3_CATEGORIES           "Fx" "Restoration"
         AU_MAIN_TYPE              kAudioUnitType_Effect)
