@@ -99,4 +99,19 @@ if (CLEER_BUILD_PLUGIN)
             juce::juce_recommended_config_flags
             juce::juce_recommended_lto_flags
             juce::juce_recommended_warning_flags)
+
+    # JUCE writes moduleinfo.json into the bundle after the binary is
+    # linker-signed, which breaks the signature seal — Ableton's scanner then
+    # rejects the plug-in with "a sealed resource is missing or invalid"
+    # (auval happens to tolerate it). Re-sign ad hoc as the last post-build
+    # step so the installed bundle always validates strictly.
+    if (APPLE)
+        foreach(fmt IN ITEMS VST3 AU Standalone)
+            if (TARGET Cleer_${fmt})
+                add_custom_command(TARGET Cleer_${fmt} POST_BUILD
+                    COMMAND codesign --force --deep -s - "$<TARGET_BUNDLE_DIR:Cleer_${fmt}>"
+                    COMMENT "Re-sealing Cleer_${fmt} signature (ad hoc)")
+            endif()
+        endforeach()
+    endif()
 endif()
