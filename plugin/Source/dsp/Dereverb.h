@@ -13,9 +13,12 @@ namespace cleer
 // delayed, decayed copy of the recent per-bin power; it is subtracted with
 // a floored Wiener-like gain.
 //
-// Runs on an internal OLA STFT (1024/256 at the host rate), so enabling it
-// costs win-hop + hop = 1024 samples of latency (~21 ms at 48 kHz). Like
-// the noise stage the exact figure is measured empirically at prepare().
+// Runs on an internal OLA STFT (512/128 at the host rate), so enabling it
+// costs win-hop + hop = 512 samples of latency (~10.7 ms at 48 kHz) — half
+// the earlier 1024/256 design; the coarser bin spacing (94 Hz) is a fine
+// trade for a vocal reverb mask, and the tail model is band-power based so
+// it barely notices. Like the noise stage the exact figure is measured
+// empirically at prepare().
 class DereverbStage
 {
 public:
@@ -94,7 +97,7 @@ public:
     }
 
 private:
-    static constexpr int kWin = 1024, kHop = 256;
+    static constexpr int kWin = 512, kHop = 128;
 
     struct Channel
     {

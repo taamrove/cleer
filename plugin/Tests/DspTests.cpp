@@ -382,7 +382,7 @@ void testDereverb()
     std::printf ("       dereverb: tail %.1f -> %.1f dB (%.1f dB removed), latency %d\n",
                  tailBefore, tailAfter, tailBefore - tailAfter, lat);
     check (tailBefore - tailAfter > 3.0, "dereverb: reverb tail cut by > 3 dB");
-    check (lat > 900 && lat < 1200, "dereverb: latency ~1024 samples");
+    check (lat > 450 && lat < 600, "dereverb: latency ~512 samples");
 }
 
 void testDereverbBypassClean()
