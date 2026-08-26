@@ -16,10 +16,11 @@ namespace cleer
 // copy), frame accumulation, and a wet/dry `mix` blended per-frame against
 // the *same* input frame, so the blend is phase-aligned by construction.
 //
-// The price of frame accumulation is latency (~10 ms + a few resampler
-// samples). It is deterministic per sample rate; latencySamples() measures
-// it empirically at prepare() by running an impulse through a scratch
-// instance, so the reported value is exact rather than derived.
+// Latency: one frame of accumulation plus the model's own two frames of
+// conv lookahead (the 2024 RNNoise peeks ahead for quality), ~30 ms total
+// at 48 kHz. The dry blend branch is delayed to match, so AMOUNT never
+// comb-filters. latencySamples() measures the exact figure empirically at
+// prepare() by running an impulse through a scratch instance.
 class NoiseSuppressor
 {
 public:
@@ -39,6 +40,8 @@ public:
         {
             c.state = rnnoise_create (nullptr);
             c.frameOrig.assign ((size_t) frameSize, 0.0);
+            c.origPrev1.assign ((size_t) frameSize, 0.0);
+            c.origPrev2.assign ((size_t) frameSize, 0.0);
             c.frameScaled.assign ((size_t) frameSize, 0.0f);
             c.wet.assign ((size_t) frameSize, 0.0f);
         }
@@ -77,6 +80,8 @@ public:
             c.up = CubicStream (sampleRate / (double) kModelRate);
             c.down = CubicStream ((double) kModelRate / sampleRate);
             c.fill = 0;
+            std::fill (c.origPrev1.begin(), c.origPrev1.end(), 0.0);
+            std::fill (c.origPrev2.begin(), c.origPrev2.end(), 0.0);
             c.outFifo.assign (fifoCapacity(), 0.0);
             c.outHead = 0;
             // Small zero cushion: burst emission from the frame processor
@@ -128,7 +133,7 @@ private:
     {
         DenoiseState* state = nullptr;
         CubicStream up, down;
-        std::vector<double> frameOrig;
+        std::vector<double> frameOrig, origPrev1, origPrev2;
         std::vector<float> frameScaled;
         std::vector<float> wet;
         int fill = 0;
@@ -180,12 +185,22 @@ private:
                     if (outputEnabled)
                         for (int k = 0; k < frameSize; ++k)
                         {
+                            // The 2024 RNNoise model has two frames of conv
+                            // lookahead: its output lags the input by
+                            // 2*frameSize (measured empirically via
+                            // cross-correlation: exactly -960 at 48 kHz).
+                            // Blend against the input from two frames ago so
+                            // wet and dry are sample-aligned — summing them
+                            // misaligned comb-filters ("flanges") at any
+                            // partial AMOUNT.
                             const double wet = (double) c.wet[(size_t) k] / 32768.0;
-                            const double blended = mix * wet + (1.0 - mix) * c.frameOrig[(size_t) k];
+                            const double blended = mix * wet + (1.0 - mix) * c.origPrev2[(size_t) k];
                             c.down.push (blended);
                             while (c.down.ready())
                                 fifoPush (c, c.down.read());
                         }
+                    std::swap (c.origPrev2, c.origPrev1);
+                    std::swap (c.origPrev1, c.frameOrig);
                 }
             }
             if (outputEnabled)

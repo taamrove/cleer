@@ -206,8 +206,9 @@ void testNoiseSuppressor()
     std::printf ("       rnnoise: noise %.1f -> %.1f dB (%.1f dB removed), latency %d\n",
                  before, after, before - after, ns.latencySamples());
     check (before - after > 10.0, "rnnoise: broadband noise cut by > 10 dB");
-    check (ns.latencySamples() > 400 && ns.latencySamples() < 600,
-           "rnnoise: latency ~1 frame at 48k");
+    // 1 frame of accumulation + 2 frames of model conv lookahead.
+    check (ns.latencySamples() > 1350 && ns.latencySamples() < 1550,
+           "rnnoise: latency ~3 frames at 48k");
 }
 
 void testNoiseLatencyAlignment()
@@ -302,7 +303,60 @@ void testNoiseResampledRate()
     std::printf ("       44.1k: noise %.1f -> %.1f dB, latency %d (~%.1f ms)\n",
                  before, after, lat, 1000.0 * lat / sr);
     check (before - after > 10.0, "rnnoise 44.1k: noise cut by > 10 dB");
-    check (lat > 380 && lat < 560, "rnnoise 44.1k: latency ~1 frame scaled");
+    check (lat > 1250 && lat < 1420, "rnnoise 44.1k: latency ~3 frames scaled");
+}
+
+void testWetDryAligned()
+{
+    // Regression for the AMOUNT "flange": the model's 2-frame lookahead
+    // means wet lags the raw input; the blend must delay dry to match.
+    // Cross-correlate a mix=1 run against a mix=0 run of a speech-like
+    // probe — the best lag must be zero.
+    const double sr = kSampleRate;
+    const size_t n = (size_t) (3.0 * sr);
+    std::vector<double> voice (n);
+    for (size_t i = 0; i < n; ++i)
+    {
+        const double t = (double) i / sr;
+        const double f0 = 220.0 * (1.0 + 0.02 * std::sin (2.0 * M_PI * 5.5 * t));
+        const double am = 0.55 + 0.45 * std::sin (2.0 * M_PI * 3.0 * t);
+        double s = 0.0;
+        for (int h = 1; h <= 8; ++h)
+            s += (1.0 / h) * std::sin (2.0 * M_PI * f0 * h * t);
+        voice[i] = 0.15 * am * s;
+    }
+
+    auto process = [&] (double mixVal) {
+        cleer::NoiseSuppressor ns;
+        ns.prepare (sr, 1);
+        ns.mix = mixVal;
+        std::vector<double> d = voice;
+        for (size_t i = 0; i < n; i += 512)
+        {
+            double* p = d.data() + i;
+            ns.processBlock (&p, 1, (int) std::min ((size_t) 512, n - i));
+        }
+        return d;
+    };
+    const auto wet = process (1.0);
+    const auto dry = process (0.0);
+
+    const size_t s0 = (size_t) sr, s1 = (size_t) (2.5 * sr);
+    double bestC = -1e18;
+    int bestLag = 0;
+    for (int lag = -1200; lag <= 1200; ++lag)
+    {
+        double c = 0.0;
+        for (size_t i = s0; i < s1; i += 2)
+            c += wet[i] * dry[(size_t) ((long) i + lag)];
+        if (c > bestC)
+        {
+            bestC = c;
+            bestLag = lag;
+        }
+    }
+    std::printf ("       wet/dry alignment: best lag %d samples\n", bestLag);
+    check (std::abs (bestLag) <= 8, "rnnoise: wet and dry branches sample-aligned (no flange)");
 }
 
 void testDereverb()
@@ -463,6 +517,7 @@ int main()
     testNoiseLatencyAlignment();
     testNoiseAmountBoundsAttenuation();
     testNoiseResampledRate();
+    testWetDryAligned();
     testDereverb();
     testDereverbBypassClean();
     testSmartGate();
