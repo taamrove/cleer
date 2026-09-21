@@ -25,7 +25,7 @@ class NoiseSuppressor
 {
 public:
     static constexpr int kModelRate = 48000;
-    static constexpr int kPrefill = 8;   // anti-underrun cushion, in host samples
+    static constexpr int kPrefill = 32;  // anti-underrun cushion, in host samples
 
     ~NoiseSuppressor() { releaseStates(); }
 
@@ -99,6 +99,13 @@ private:
     // Output-driven Catmull-Rom resampler: push source samples, read all
     // ready destination samples. At step == 1 it reproduces its input
     // exactly (one-sample delay), so 48 kHz hosts pay no quality cost.
+    //
+    // The phase is COMPUTED (reads * step), never accumulated. `pos += step`
+    // rounds once per sample, and at 44.1 kHz (step not binary-representable)
+    // hours of running drifted the phase tens of samples, walking the output
+    // FIFO occupancy into permanent underrun — heard as a plugin that was
+    // fine all soundcheck and glitched every frame after sitting idle for a
+    // couple of hours. One multiply per read has bounded error forever.
     struct CubicStream
     {
         explicit CubicStream (double stepIn = 1.0) : step (stepIn) {}
@@ -109,23 +116,25 @@ private:
             ++base;
         }
 
-        bool ready() const { return (long) std::floor (pos) + 2 <= base; }
+        double pos() const { return (double) reads * step; }
+        bool ready() const { return (long) std::floor (pos()) + 2 <= base; }
 
         double read()
         {
-            const double t = pos - std::floor (pos);
+            const double p = pos();
+            const double t = p - std::floor (p);
             const double s0 = win[0], s1 = win[1], s2 = win[2], s3 = win[3];
             const double out = 0.5 * (2.0 * s1
                                       + (-s0 + s2) * t
                                       + (2.0 * s0 - 5.0 * s1 + 4.0 * s2 - s3) * t * t
                                       + (-s0 + 3.0 * s1 - 3.0 * s2 + s3) * t * t * t);
-            pos += step;
+            ++reads;
             return out;
         }
 
         double win[4] = { 0, 0, 0, 0 };
         long base = -1;
-        double pos = 0.0;
+        long reads = 0;
         double step = 1.0;
     };
 
