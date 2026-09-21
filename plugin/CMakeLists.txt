@@ -83,6 +83,11 @@ if (CLEER_BUILD_TESTS)
     add_executable(cleer_process Tools/process_wav.cpp)
     target_link_libraries(cleer_process PRIVATE rnnoise)
     target_compile_features(cleer_process PRIVATE cxx_std_17)
+
+    # Long-run soak test: hours of idle hiss + periodic voice bursts.
+    add_executable(cleer_soak Tools/soak_test.cpp)
+    target_link_libraries(cleer_soak PRIVATE rnnoise)
+    target_compile_features(cleer_soak PRIVATE cxx_std_17)
 endif()
 
 # ---------------------------------------------------------------------------

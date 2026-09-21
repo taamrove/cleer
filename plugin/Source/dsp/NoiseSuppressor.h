@@ -61,6 +61,10 @@ public:
 
     int latencySamples() const { return latency; }
 
+    // Diagnostic: pops that found the FIFO empty. A bounded number at
+    // startup is the reported latency; growth during steady state is a bug.
+    long underruns = 0;
+
     // Voice-activity probability from the last processed frame (channel 0).
     float voiceProbability() const { return lastVad; }
 
@@ -168,7 +172,10 @@ private:
     double fifoPop (Channel& c)
     {
         if (c.outCount == 0)
-            return 0.0;     // warm-up: zeros account for the reported latency
+        {
+            ++underruns;    // steady-state underruns are a bug; warm-up zeros are counted too but bounded
+            return 0.0;
+        }
         const double v = c.outFifo[(size_t) c.outHead];
         c.outHead = (c.outHead + 1) % (int) c.outFifo.size();
         --c.outCount;

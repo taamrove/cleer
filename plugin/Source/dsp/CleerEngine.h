@@ -69,6 +69,7 @@ public:
     }
 
     float voiceProbability() const { return noise ? noise->voiceProbability() : 0.0f; }
+    long noiseUnderruns() const { return noise ? noise->underruns : 0; }
 
     void setFeedbackParams (const FeedbackSuppressor::Params& p)
     {
