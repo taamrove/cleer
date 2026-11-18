@@ -10,6 +10,7 @@ constexpr auto kFbDepth     = "fb_depth";     // max notch depth, dB
 constexpr auto kFbQ         = "fb_q";
 constexpr auto kNoiseOn     = "noise_on";
 constexpr auto kNoiseAmount = "noise_amount";
+constexpr auto kNoiseMode   = "nr_mode";      // 0 = Live (zero latency), 1 = Quality
 constexpr auto kDvOn        = "dv_on";
 constexpr auto kDvAmount    = "dv_amount";
 constexpr auto kDvRt60      = "dv_rt60";
@@ -57,6 +58,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout CleerAudioProcessor::createL
         juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 90.0f,
         juce::AudioParameterFloatAttributes().withLabel ("%")));
 
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { kNoiseMode, 1 }, "NR Mode", juce::StringArray { "Live", "Quality" }, 0));
+
     layout.add (std::make_unique<BoolParam> (juce::ParameterID { kDvOn, 1 }, "Dereverb", false));
     layout.add (std::make_unique<FloatParam> (
         juce::ParameterID { kDvAmount, 1 }, "Reverb Amount",
@@ -103,6 +107,7 @@ void CleerAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     // frame latency while enabled. Reported dynamically when toggled.
     engine.noiseEnabled = apvts.getRawParameterValue ("noise_on")->load() > 0.5f;
     engine.dereverbEnabled = apvts.getRawParameterValue ("dv_on")->load() > 0.5f;
+    engine.setNoiseLive (apvts.getRawParameterValue ("nr_mode")->load() < 0.5f);
     setLatencySamples (engine.latencySamples());
 }
 
@@ -130,8 +135,10 @@ void CleerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
 
     const bool noiseOn = boolValue (kNoiseOn);
     const bool dvOn = boolValue (kDvOn);
-    if (noiseOn != engine.noiseEnabled || dvOn != engine.dereverbEnabled)
+    const bool live = value (kNoiseMode) < 0.5;
+    if (noiseOn != engine.noiseEnabled || dvOn != engine.dereverbEnabled || live != engine.noiseLive())
     {
+        engine.setNoiseLive (live);
         engine.noiseEnabled = noiseOn;
         engine.dereverbEnabled = dvOn;
         setLatencySamples (engine.latencySamples());

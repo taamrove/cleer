@@ -128,6 +128,10 @@ adds one STFT window (~21 ms at the current settings); the neural net itself is
 < 1 ms and never the bottleneck. Full breakdown and the knobs to cut it:
 [`docs/latency.md`](docs/latency.md).
 
+The VST3/AU plug-in's noise remover (RNNoise) has an **NR Mode** switch: **Live**
+(default, 0 ms: the model steers a zero-latency minimum-phase filter) or
+**Quality** (~40 ms, audio goes through the model).
+
 ## Status / roadmap
 
 - [x] Validated Python reference for all three stages

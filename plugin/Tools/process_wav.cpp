@@ -4,7 +4,7 @@
 // A/B against the commercial plugin on real material.
 //
 //   cleer_process INPUT.wav [--out OUT.wav] [--start S] [--dur S]
-//                 [--noise-mix 0..1] [--no-fb] [--no-noise] [--no-gate]
+//                 [--noise-mix 0..1] [--nr-mode live|quality] [--no-fb] [--no-noise] [--no-gate]
 //
 // Output is latency-compensated (the RNNoise frame delay is trimmed), so
 // input and output stay sample-aligned for difference listening.
@@ -179,6 +179,7 @@ int main (int argc, char** argv)
     }
     std::string inPath = argv[1], outPath;
     double start = 0.0, dur = 0.0, noiseMix = 0.9;
+    bool live = true;
     bool fb = true, noise = true, gate = true, dv = false;
     for (int i = 2; i < argc; ++i)
     {
@@ -188,6 +189,7 @@ int main (int argc, char** argv)
         else if (a == "--start") start = next();
         else if (a == "--dur") dur = next();
         else if (a == "--noise-mix") noiseMix = next();
+        else if (a == "--nr-mode" && i + 1 < argc) live = std::string (argv[++i]) != "quality";
         else if (a == "--dv") dv = true;
         else if (a == "--no-fb") fb = false;
         else if (a == "--no-noise") noise = false;
@@ -219,6 +221,8 @@ int main (int argc, char** argv)
     e.gateEnabled = gate;
     e.dereverbEnabled = dv;
     e.setNoiseMix (noiseMix);
+    e.setNoiseLive (live);
+    e.setNoiseOfflineExact (true);   // offline: see every model frame
 
     std::vector<double*> ptrs ((size_t) w.channels);
     int maxNotches = 0;
@@ -252,8 +256,8 @@ int main (int argc, char** argv)
         for (auto& chData : w.data)
             chData.erase (chData.begin(), chData.begin() + std::min ((size_t) lat, chData.size()));
 
-    std::printf ("chain: fb=%d noise=%d(mix %.2f) dv=%d gate=%d, latency %d smp, max notches %d\n",
-                 fb, noise, noiseMix, dv, gate, lat, maxNotches);
+    std::printf ("chain: nr=%s fb=%d noise=%d(mix %.2f) dv=%d gate=%d, latency %d smp, max notches %d\n",
+                 live ? "live" : "quality", fb, noise, noiseMix, dv, gate, lat, maxNotches);
     const size_t sec = (size_t) w.sampleRate;
     for (size_t s0 = 0; s0 + sec <= w.data[0].size() && s0 < 10 * sec; s0 += 2 * sec)
         std::printf ("  %4.0fs  in %6.1f dB   out %6.1f dB   diff %+5.1f dB\n",

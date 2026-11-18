@@ -538,6 +538,185 @@ void testNoSlowCallbackAtSmallBlocks()
     check (slow <= 10, "rnnoise: no callback runs a model frame inline at 64-sample blocks");
 }
 
+// ---- Live mode -----------------------------------------------------------
+
+// Speech-like test signal: 120 Hz glottal pulses (slight vibrato) through
+// three formant resonators, gated into 0.4 s "syllables" every 0.9 s,
+// over stationary white noise. RNNoise treats this as voice (a bare sine
+// it would annihilate).
+struct SpeechNoise
+{
+    std::vector<float> mix, noiseOnly, speechOnly;
+    std::vector<std::pair<size_t, size_t>> speechSpans, noiseSpans;
+};
+
+SpeechNoise makeSpeechNoise (double seconds, double noiseDB, unsigned seed)
+{
+    const size_t total = (size_t) (seconds * kSampleRate);
+    SpeechNoise s;
+    s.noiseOnly = whiteNoise (total, noiseDB, seed);
+    s.speechOnly.assign (total, 0.0f);
+    const double fc[3] = { 700, 1200, 2600 }, bw[3] = { 90, 110, 160 }, amp[3] = { 1.0, 0.6, 0.3 };
+    double y1[3] = {}, y2[3] = {}, ph = 0.0;
+    for (size_t i = 0; i < total; ++i)
+    {
+        const double t = (double) i / kSampleRate;
+        ph += (120.0 + 4.0 * std::sin (2.0 * M_PI * 5.0 * t)) / kSampleRate;
+        double src = 0.0;
+        if (ph >= 1.0) { ph -= 1.0; src = 1.0; }
+        double o = 0.0;
+        for (int f = 0; f < 3; ++f)
+        {
+            const double r = std::exp (-M_PI * bw[f] / kSampleRate);
+            const double a1 = -2.0 * r * std::cos (2.0 * M_PI * fc[f] / kSampleRate);
+            const double y = src - a1 * y1[f] - r * r * y2[f];
+            y2[f] = y1[f]; y1[f] = y;
+            o += amp[f] * y * (1.0 - r);
+        }
+        const double cyc = std::fmod (t, 0.9);
+        const double env = cyc < 0.4 ? std::min (1.0, std::min (cyc, 0.4 - cyc) / 0.02) : 0.0;
+        s.speechOnly[i] = (float) (o * env * 6.0);
+    }
+    // normalise speech to -22 dBFS RMS over the voiced spans
+    double acc = 0.0; size_t cnt = 0;
+    for (size_t i = 0; i < total; ++i)
+        if (std::fmod ((double) i / kSampleRate, 0.9) < 0.4) { acc += (double) s.speechOnly[i] * s.speechOnly[i]; ++cnt; }
+    const double g = std::pow (10.0, -22.0 / 20.0) / std::sqrt (acc / (double) cnt);
+    for (auto& v : s.speechOnly) v = (float) (v * g);
+    s.mix.resize (total);
+    for (size_t i = 0; i < total; ++i)
+        s.mix[i] = s.speechOnly[i] + s.noiseOnly[i];
+    for (double t0 = 0.0; (t0 + 0.9) * kSampleRate < (double) total; t0 += 0.9)
+    {
+        s.speechSpans.push_back ({ (size_t) ((t0 + 0.1) * kSampleRate), (size_t) ((t0 + 0.35) * kSampleRate) });
+        s.noiseSpans.push_back ({ (size_t) ((t0 + 0.6) * kSampleRate), (size_t) ((t0 + 0.88) * kSampleRate) });
+    }
+    return s;
+}
+
+double spanRms (const std::vector<float>& x, const std::vector<std::pair<size_t, size_t>>& sp, size_t skip)
+{
+    double acc = 0.0, n = 0.0;
+    for (size_t k = skip; k < sp.size(); ++k)
+        for (size_t i = sp[k].first; i < sp[k].second; ++i) { acc += (double) x[i] * x[i]; n += 1.0; }
+    return 20.0 * std::log10 (std::sqrt (acc / n) + 1e-12);
+}
+
+void testLiveLatency()
+{
+    // Impulse through the live stage comes out where it went in.
+    cleer::NoiseSuppressor ns;
+    ns.prepare (kSampleRate, 1);
+    ns.setLive (true);
+    const size_t total = (size_t) (2.0 * kSampleRate), at = (size_t) (1.5 * kSampleRate) + 17;
+    std::vector<double> d (total, 0.0);
+    d[at] = 0.5;
+    for (size_t i = 0; i < total; i += 64)
+    {
+        double* p = d.data() + i;
+        ns.processBlock (&p, 1, 64);
+    }
+    size_t best = 0;
+    for (size_t i = 0; i < total; ++i)
+        if (std::abs (d[i]) > std::abs (d[best])) best = i;
+    std::printf ("       live: reported latency %d, impulse peak at +%d samples\n",
+                 ns.latencySamples(), (int) best - (int) at);
+    check (ns.latencySamples() == 0, "live: reported latency is 0");
+    check ((int) best - (int) at >= 0 && (int) best - (int) at <= 1, "live: impulse aligned with input");
+}
+
+void testLiveSuppresses()
+{
+    auto s = makeSpeechNoise (8.0, -38.0, 11);
+    cleer::Engine e;
+    e.prepare (kSampleRate, 1, 64);
+    e.gateEnabled = false;
+    e.feedbackEnabled = false;
+    e.setNoiseLive (true);
+    e.setNoiseOfflineExact (true);
+    e.setNoiseMix (0.9);
+    auto y = s.mix;
+    for (size_t i = 0; i < y.size(); i += 64)
+    {
+        float* p = y.data() + i;
+        e.processBlock (&p, 1, (int) std::min ((size_t) 64, y.size() - i));
+    }
+    const double nIn = spanRms (s.mix, s.noiseSpans, 2), nOut = spanRms (y, s.noiseSpans, 2);
+    const double sIn = spanRms (s.mix, s.speechSpans, 2), sOut = spanRms (y, s.speechSpans, 2);
+    std::printf ("       live: noise %.1f -> %.1f dB (%.1f removed), speech %.1f -> %.1f dB (%+.1f)\n",
+                 nIn, nOut, nIn - nOut, sIn, sOut, sOut - sIn);
+    {   // reference: Quality mode on the same material (latency-compensated)
+        cleer::Engine q;
+        q.prepare (kSampleRate, 1, 512);
+        q.gateEnabled = false; q.feedbackEnabled = false;
+        q.setNoiseMix (0.9);
+        auto z = s.mix;
+        z.resize (z.size() + 4096, 0.0f);
+        run (q, z);
+        z.erase (z.begin(), z.begin() + q.latencySamples());
+        z.resize (s.mix.size());
+        std::printf ("       (quality reference: noise %.1f dB removed, speech %+.1f dB)\n",
+                     nIn - spanRms (z, s.noiseSpans, 2), spanRms (z, s.speechSpans, 2) - sIn);
+    }
+    check (nIn - nOut > 12.0, "live: noise-only stretches cut by > 12 dB");
+    check (std::abs (sOut - sIn) < 2.0, "live: speech level within 2 dB");
+}
+
+void testLiveOnset()
+{
+    // The first 30 ms of each word must not be dulled while the model's
+    // gains are still those of the preceding silence.
+    auto s = makeSpeechNoise (8.0, -38.0, 11);
+    cleer::Engine e;
+    e.prepare (kSampleRate, 1, 64);
+    e.gateEnabled = false; e.feedbackEnabled = false;
+    e.setNoiseLive (true);
+    e.setNoiseOfflineExact (true);
+    e.setNoiseMix (0.9);
+    auto y = s.mix;
+    for (size_t i = 0; i < y.size(); i += 64)
+    {
+        float* p = y.data() + i;
+        e.processBlock (&p, 1, (int) std::min ((size_t) 64, y.size() - i));
+    }
+    std::vector<std::pair<size_t, size_t>> on;
+    for (double t0 = 1.8; t0 + 0.9 < 7.5; t0 += 0.9)
+        on.push_back ({ (size_t) (t0 * kSampleRate), (size_t) ((t0 + 0.12) * kSampleRate) });
+    const double a = spanRms (s.mix, on, 0), b = spanRms (y, on, 0);
+    std::printf ("       live onset (first 120 ms of words): %.1f -> %.1f dB (%+.1f)\n", a, b, b - a);
+    check (b - a > -0.9, "live: onset bypass keeps first 120 ms of words within 0.9 dB (no bypass: -1.2)");
+}
+
+void testLiveNoSlowCallback()
+{
+    const int bs = 64;
+    cleer::Engine e;
+    e.prepare (48000.0, 1, bs);
+    e.gateEnabled = false;
+    e.setNoiseLive (true);
+    std::vector<float> blk ((size_t) bs);
+    unsigned seed = 1;
+    double worstMs = 0.0, sumMs = 0.0;
+    int slow = 0;
+    auto next = std::chrono::steady_clock::now();
+    for (int b = 0; b < 1500; ++b)
+    {
+        next += std::chrono::microseconds (1333);
+        std::this_thread::sleep_until (next);
+        for (auto& v : blk) { seed = seed * 1664525u + 1013904223u; v = 0.05f * ((seed >> 8) / 8388608.0f - 1.0f); }
+        float* p = blk.data();
+        const auto t0 = std::chrono::steady_clock::now();
+        e.processBlock (&p, 1, bs);
+        const double ms = std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now() - t0).count();
+        if (b >= 50) { worstMs = std::max (worstMs, ms); sumMs += ms; slow += ms > 0.4; }
+    }
+    std::printf ("       live 64-sample callbacks: mean %.3f ms, worst %.3f ms, %d > 0.4 ms (budget 1.333)\n",
+                 sumMs / 1450.0, worstMs, slow);
+    // Mean = the DSP cost; the over-0.4 ms count is dominated by OS scheduling noise
+    // (the Quality test shows the same on a busy machine), so keep it loose.
+    check (sumMs / 1450.0 < 0.2 && slow <= 30, "live: callbacks stay under budget at 64-sample blocks (mean < 0.2 ms)");
+}
+
 } // namespace
 
 int main()
@@ -554,6 +733,10 @@ int main()
     testDereverbBypassClean();
     testSmartGate();
     testNoSlowCallbackAtSmallBlocks();
+    testLiveLatency();
+    testLiveSuppresses();
+    testLiveOnset();
+    testLiveNoSlowCallback();
     std::printf (failures == 0 ? "\nAll tests passed.\n" : "\n%d test(s) FAILED.\n", failures);
     return failures == 0 ? 0 : 1;
 }

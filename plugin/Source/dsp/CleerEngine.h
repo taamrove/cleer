@@ -45,6 +45,20 @@ public:
     bool gateEnabled = true;
     bool gateSmart = true;
 
+    void setNoiseLive (bool v)
+    {
+        if (noise)
+            noise->setLive (v);
+    }
+
+    bool noiseLive() const { return noise && noise->live; }
+
+    void setNoiseOfflineExact (bool v)
+    {
+        if (noise)
+            noise->offlineExact = v;
+    }
+
     void setNoiseMix (double m)
     {
         if (noise)

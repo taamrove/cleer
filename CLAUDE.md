@@ -114,3 +114,20 @@ cp out/CleerDenoiser.mlmodel ../macos/Cleer/Resources/   # ship retrained model
   `claude/de-feedback-internals-vgaZe`.
 - Match the surrounding code style; keep the Python reference runnable (it's the
   source of truth for the DSP math).
+
+## Plugin noise remover: Live vs Quality (C++ only)
+
+`plugin/Source/dsp/NoiseSuppressor.h`; param `nr_mode` (Live = default / Quality).
+- **Quality**: audio goes through RNNoise on a worker thread (~4 frames, ~40 ms, reported to the host).
+- **Live** (latency 0): RNNoise is analysis-only. Its per-bin gain curve (vendored `denoise.c`
+  patched with `rnnoise_get_gains`, marked `CLEER PATCH`) becomes a 256-tap minimum-phase FIR
+  (cepstral design, 512-pt FFT, on the audio thread each 10 ms frame), time-domain convolved on the
+  undelayed input, linearly crossfaded per frame. Gains: AMOUNT = max attenuation, open instantly /
+  close at 0.5 per frame. Graded onset bypass (fast HP level vs 128 ms recent minimum, +14..26 dB,
+  45 ms hold) covers the ~40 ms model lag. The audio thread never waits on the worker; a busy
+  worker just skips a frame. `offlineExact` (set by `cleer_process` and tests) waits instead, so
+  faster-than-real-time renders see every frame.
+- `reference/` (Python) has no RNNoise stage, so Live mode is not ported (macOS Swift app neither).
+- `cleer_process --nr-mode live|quality` renders A/B. Tuning evidence: onset thresholds trade gap
+  reduction against onset dulling; 14/26 was picked on `carina_dry_slice.wav`.
+- Callback-timing tests are noisy on a busy machine (Quality shows the same spikes).

@@ -84,7 +84,7 @@ struct DenoiseState {
   kiss_fft_cpx delayed_P[FREQ_SIZE];
   float delayed_Ex[NB_BANDS], delayed_Ep[NB_BANDS];
   float delayed_Exp[NB_BANDS];
-
+  float outgf[FREQ_SIZE];   /* CLEER PATCH: last applied per-bin gain curve */
 };
 
 static void compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
@@ -468,6 +468,7 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
   int silence;
   static const float a_hp[2] = {-1.99599, 0.99600};
   static const float b_hp[2] = {-2, 1};
+  for (i=0;i<FREQ_SIZE;i++) st->outgf[i] = 1.f;   /* CLEER PATCH */
   rnn_biquad(x, st->mem_hp_x, in, b_hp, a_hp, FRAME_SIZE);
   silence = rnn_compute_frame_features(st, X, P, Ex, Ep, Exp, features, x);
 
@@ -486,6 +487,7 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
       st->lastg[i] = MIN16(1.f, g[i]*(st->delayed_Ex[i]+1e-3)/(Ex[i]+1e-3));
     }
     interp_band_gain(gf, g);
+    RNN_COPY(st->outgf, gf, FREQ_SIZE);   /* CLEER PATCH */
 #if 1
     for (i=0;i<FREQ_SIZE;i++) {
       st->delayed_X[i].r *= gf[i];
@@ -503,3 +505,9 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
   return vad_prob;
 }
 
+
+/* CLEER PATCH: per-bin (50 Hz spacing, FREQ_SIZE bins) gains applied by the last
+   rnnoise_process_frame call, for steering an external zero-latency filter. */
+void rnnoise_get_gains(const DenoiseState *st, float *gf) {
+  RNN_COPY(gf, st->outgf, FREQ_SIZE);
+}

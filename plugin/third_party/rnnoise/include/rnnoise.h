@@ -91,6 +91,9 @@ RNNOISE_EXPORT void rnnoise_destroy(DenoiseState *st);
  *
  * in and out must be at least rnnoise_get_frame_size() large.
  */
+/* CLEER PATCH: copy the 481-bin (50 Hz/bin at 48 kHz) gain curve of the last frame. */
+RNNOISE_EXPORT void rnnoise_get_gains(const DenoiseState *st, float *gf481);
+
 RNNOISE_EXPORT float rnnoise_process_frame(DenoiseState *st, float *out, const float *in);
 
 /**

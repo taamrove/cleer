@@ -397,6 +397,12 @@ public:
             addAndMakeVisible (*k);
         addAndMakeVisible (voiceLamp);
 
+        nrMode.addItemList ({ "LIVE", "QUALITY" }, 1);
+        nrMode.setTooltip ("Live: zero latency. Quality: ~40 ms, cleaner.");
+        addAndMakeVisible (nrMode);
+        nrModeAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
+            p.apvts, "nr_mode", nrMode);
+
         fbOn.setButtonText ("KILL");
         noiseOn.setButtonText ("NR");
         dvOn.setButtonText ("DV");
@@ -465,7 +471,7 @@ public:
         area.removeFromTop (10);
         fbPanel = area.removeFromLeft (252);
         area.removeFromLeft (10);
-        noisePanel = area.removeFromLeft (140);
+        noisePanel = area.removeFromLeft (190);
         area.removeFromLeft (10);
         dvPanel = area.removeFromLeft (180);
         area.removeFromLeft (10);
@@ -486,6 +492,7 @@ public:
         layoutPanel (dvPanel, dvOn, { &dvAmount, &dvRt60 });
         layoutPanel (gatePanel, gateOn, { &gateThresh, &gateRatio, &gateRange,
                                           &gateAttack, &gateRelease, &gateHold });
+        nrMode.setBounds (noisePanel.getX() + 56, noisePanel.getY() + 6, 70, 20);
         gateSmart.setBounds (gatePanel.getRight() - 128, gatePanel.getY() + 6, 58, 20);
         voiceLamp.setBounds (noisePanel.getX() + 10, noisePanel.getBottom() - 24,
                              noisePanel.getWidth() - 20, 16);
@@ -503,6 +510,8 @@ private:
     cleerui::Knob dvAmount, dvRt60;
     cleerui::Knob gateThresh, gateRatio, gateRange, gateAttack, gateRelease, gateHold;
 
+    juce::ComboBox nrMode;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> nrModeAtt;
     juce::ToggleButton fbOn, noiseOn, dvOn, gateOn, gateSmart;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> fbOnAtt, noiseOnAtt,
         dvOnAtt, gateOnAtt, gateSmartAtt;
