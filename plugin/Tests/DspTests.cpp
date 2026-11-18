@@ -7,8 +7,10 @@
 //      touching the phrase itself.
 // Exits non-zero on failure; `ctest` runs it.
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <thread>
 #include <vector>
 #include "../Source/dsp/CleerEngine.h"
 #include "../Source/dsp/Dereverb.h"
@@ -206,9 +208,9 @@ void testNoiseSuppressor()
     std::printf ("       rnnoise: noise %.1f -> %.1f dB (%.1f dB removed), latency %d\n",
                  before, after, before - after, ns.latencySamples());
     check (before - after > 10.0, "rnnoise: broadband noise cut by > 10 dB");
-    // 1 frame of accumulation + 2 frames of model conv lookahead.
-    check (ns.latencySamples() > 1350 && ns.latencySamples() < 1550,
-           "rnnoise: latency ~3 frames at 48k");
+    // 1 frame accumulation + 2 frames model lookahead + 1 frame worker hand-off.
+    check (ns.latencySamples() > 1850 && ns.latencySamples() < 2050,
+           "rnnoise: latency ~4 frames at 48k");
 }
 
 void testNoiseLatencyAlignment()
@@ -303,7 +305,7 @@ void testNoiseResampledRate()
     std::printf ("       44.1k: noise %.1f -> %.1f dB, latency %d (~%.1f ms)\n",
                  before, after, lat, 1000.0 * lat / sr);
     check (before - after > 10.0, "rnnoise 44.1k: noise cut by > 10 dB");
-    check (lat > 1250 && lat < 1420, "rnnoise 44.1k: latency ~3 frames scaled");
+    check (lat > 1650 && lat < 1850, "rnnoise 44.1k: latency ~4 frames scaled");
 }
 
 void testWetDryAligned()
@@ -506,6 +508,36 @@ void testSmartGate()
     check (voiced > -44.0, "smart gate: vad=1 keeps it open");
 }
 
+// Regression: RNNoise inference (~1 ms/frame) ran inline in the callback, so
+// at 48k/64-sample buffers (1.33 ms budget) every ~7th callback overran and
+// the output glitched constantly; >=128 was fine. No callback may now do the
+// inference itself, whatever the block size.
+void testNoSlowCallbackAtSmallBlocks()
+{
+    const int bs = 64;
+    cleer::Engine e;
+    e.prepare (48000.0, 1, bs);
+    e.gateEnabled = false;
+    std::vector<float> blk ((size_t) bs);
+    unsigned seed = 1;
+    double worstMs = 0.0;
+    int slow = 0;   // old inline code: one per frame (~1 in 7.5 callbacks)
+    auto next = std::chrono::steady_clock::now();
+    for (int b = 0; b < 1000; ++b)
+    {
+        next += std::chrono::microseconds (1333);   // real-time pacing
+        std::this_thread::sleep_until (next);
+        for (auto& v : blk) { seed = seed * 1664525u + 1013904223u; v = 0.05f * ((seed >> 8) / 8388608.0f - 1.0f); }
+        float* p = blk.data();
+        const auto t0 = std::chrono::steady_clock::now();
+        e.processBlock (&p, 1, bs);
+        const double ms = std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now() - t0).count();
+        if (b >= 50) { worstMs = std::max (worstMs, ms); slow += ms > 0.4; }   // skip warm-up
+    }
+    std::printf ("       64-sample callbacks: worst %.3f ms, %d slow (budget 1.333 ms)\n", worstMs, slow);
+    check (slow <= 10, "rnnoise: no callback runs a model frame inline at 64-sample blocks");
+}
+
 } // namespace
 
 int main()
@@ -521,6 +553,7 @@ int main()
     testDereverb();
     testDereverbBypassClean();
     testSmartGate();
+    testNoSlowCallbackAtSmallBlocks();
     std::printf (failures == 0 ? "\nAll tests passed.\n" : "\n%d test(s) FAILED.\n", failures);
     return failures == 0 ? 0 : 1;
 }

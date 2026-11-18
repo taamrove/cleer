@@ -1,7 +1,11 @@
 #pragma once
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include <memory>
+#include <thread>
 #include <rnnoise.h>
 
 namespace cleer
@@ -42,6 +46,8 @@ public:
             c.frameOrig.assign ((size_t) frameSize, 0.0);
             c.origPrev1.assign ((size_t) frameSize, 0.0);
             c.origPrev2.assign ((size_t) frameSize, 0.0);
+            c.origPrev3.assign ((size_t) frameSize, 0.0);
+            c.worker = std::make_unique<Worker> (c.state);
             c.frameScaled.assign ((size_t) frameSize, 0.0f);
             c.wet.assign ((size_t) frameSize, 0.0f);
         }
@@ -86,6 +92,7 @@ public:
             c.fill = 0;
             std::fill (c.origPrev1.begin(), c.origPrev1.end(), 0.0);
             std::fill (c.origPrev2.begin(), c.origPrev2.end(), 0.0);
+            std::fill (c.origPrev3.begin(), c.origPrev3.end(), 0.0);
             c.outFifo.assign (fifoCapacity(), 0.0);
             c.outHead = 0;
             // Small zero cushion: burst emission from the frame processor
@@ -93,6 +100,11 @@ public:
             // the first frame; without the cushion those pops underrun and
             // inject mid-stream zeros, making the delay time-varying.
             c.outCount = kPrefill;
+            if (c.worker)
+            {
+                c.worker->waitIdleOrDone();
+                c.worker->st.store (0);
+            }
             if (c.state != nullptr)
                 rnnoise_init (c.state, nullptr);
         }
@@ -142,9 +154,51 @@ private:
         double step = 1.0;
     };
 
+    // One RNNoise frame costs ~1 ms (big 2024 model) — a whole 64-sample
+    // callback's budget at 48 kHz. Running it inline made every ~7th
+    // callback overrun (constant "digital" glitching at small buffers,
+    // clean at >=128). The audio thread only hands frames to this worker
+    // and picks the result up one frame later (+10 ms latency). Results are
+    // collected in strict frame order, so output is deterministic and
+    // independent of thread timing.
+    struct Worker
+    {
+        Worker (DenoiseState* s) : state (s), th ([this] { run(); }) {}
+        ~Worker() { stop.store (true); th.join(); }
+
+        void run()
+        {
+            while (! stop.load())
+            {
+                if (st.load (std::memory_order_acquire) == 1)
+                {
+                    vad = rnnoise_process_frame (state, out, in);
+                    st.store (2, std::memory_order_release);
+                }
+                else
+                    std::this_thread::sleep_for (std::chrono::microseconds (200));
+            }
+        }
+
+        void waitIdleOrDone() const
+        {
+            while (st.load (std::memory_order_acquire) == 1)
+                std::this_thread::yield();
+        }
+
+        DenoiseState* state;
+        float in[480], out[480];
+        float vad = 0.0f;
+        std::atomic<int> st { 0 };   // 0 idle, 1 pending, 2 result ready
+        std::atomic<bool> stop { false };
+        std::thread th;
+    };
+
     struct Channel
     {
         DenoiseState* state = nullptr;
+        std::unique_ptr<Worker> worker;
+        std::vector<double> origPrev3;
         CubicStream up, down;
         std::vector<double> frameOrig, origPrev1, origPrev2;
         std::vector<float> frameScaled;
@@ -195,26 +249,35 @@ private:
                 if (++c.fill == frameSize)
                 {
                     c.fill = 0;
-                    const float vad = rnnoise_process_frame (c.state, c.wet.data(), c.frameScaled.data());
-                    if (trackVad)
-                        lastVad = vad;
-                    if (outputEnabled)
+                    // Collect the previous frame's result (normally long
+                    // done), then hand this frame to the worker.
+                    Worker& w = *c.worker;
+                    const bool haveWet = w.st.load (std::memory_order_acquire) != 0;
+                    if (haveWet)
+                    {
+                        w.waitIdleOrDone();
+                        std::memcpy (c.wet.data(), w.out, sizeof (float) * (size_t) frameSize);
+                        if (trackVad)
+                            lastVad = w.vad;
+                    }
+                    std::memcpy (w.in, c.frameScaled.data(), sizeof (float) * (size_t) frameSize);
+                    w.st.store (1, std::memory_order_release);
+                    if (haveWet && outputEnabled)
                         for (int k = 0; k < frameSize; ++k)
                         {
                             // The 2024 RNNoise model has two frames of conv
-                            // lookahead: its output lags the input by
-                            // 2*frameSize (measured empirically via
-                            // cross-correlation: exactly -960 at 48 kHz).
-                            // Blend against the input from two frames ago so
-                            // wet and dry are sample-aligned — summing them
-                            // misaligned comb-filters ("flanges") at any
-                            // partial AMOUNT.
+                            // lookahead (output lags input by 2*frameSize,
+                            // measured), plus our one frame of worker
+                            // hand-off: blend against the input from three
+                            // frames ago so wet and dry stay sample-aligned
+                            // (misaligned sums comb-filter at partial AMOUNT).
                             const double wet = (double) c.wet[(size_t) k] / 32768.0;
-                            const double blended = mix * wet + (1.0 - mix) * c.origPrev2[(size_t) k];
+                            const double blended = mix * wet + (1.0 - mix) * c.origPrev3[(size_t) k];
                             c.down.push (blended);
                             while (c.down.ready())
                                 fifoPush (c, c.down.read());
                         }
+                    std::swap (c.origPrev3, c.origPrev2);
                     std::swap (c.origPrev2, c.origPrev1);
                     std::swap (c.origPrev1, c.frameOrig);
                 }
@@ -264,6 +327,8 @@ private:
 
     void releaseStates()
     {
+        for (auto& c : channels)
+            c.worker.reset();   // join before the state goes away
         for (auto& c : channels)
             if (c.state != nullptr)
                 rnnoise_destroy (c.state);
